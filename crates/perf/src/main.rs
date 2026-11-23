@@ -206,6 +206,7 @@ struct Args {
     multi: bool,
     windows: u32,
     sweep: bool,
+    motion_only: bool,
 }
 
 fn parse_args() -> Args {
@@ -222,6 +223,7 @@ fn parse_args() -> Args {
         multi: false,
         windows: 3,
         sweep: false,
+        motion_only: false,
     };
     let argv: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -278,6 +280,10 @@ fn parse_args() -> Args {
             }
             "--sweep" => {
                 a.sweep = true;
+                i += 1;
+            }
+            "--motion-only" => {
+                a.motion_only = true;
                 i += 1;
             }
             _ => break,
@@ -754,6 +760,7 @@ fn parse_args_shallow(a: &Args) -> Args {
         multi: false,
         windows: a.windows,
         sweep: false,
+        motion_only: a.motion_only,
     }
 }
 
@@ -773,8 +780,13 @@ fn main() -> Result<()> {
             }
         }
     } else {
+        let kinds: &[Content] = if args.motion_only {
+            &[Content::Motion]
+        } else {
+            &[Content::Static, Content::Motion]
+        };
         for (w, h, bitrate) in [(1280u32, 720u32, 2500u32), (1920, 1080, 5000)] {
-            for kind in [Content::Static, Content::Motion] {
+            for &kind in kinds {
                 lines.push(run_scenario(&args, kind, w, h, bitrate)?);
             }
         }
