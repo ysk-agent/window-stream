@@ -3,8 +3,14 @@
 A new remote-display protocol: **minimum latency without the client power cost
 of a full-screen video stream**. Not for gaming; for interactive desktop work.
 
-Status: design phase. This repository holds the design summary and the
-implementation policy. No code yet.
+Status: implementation in progress. All five initial tracks are integrated
+into `main` as one Cargo workspace: `proto` / `transport` / `dummy`
+(WebTransport round trip: Hello -> Window -> Frame -> FrameAck), `codec`
+(VP9 over libvpx), `client` (winit + wgpu compositing, demo mode),
+`platform` (macOS ScreenCaptureKit adapter; stub elsewhere), and the
+Android app (Kotlin shell + Rust core over JNI, built by GitHub Actions).
+Not yet wired together end to end: the client still runs on locally
+generated frames, and no real capture-to-client pipeline exists yet.
 
 ## Goal
 
