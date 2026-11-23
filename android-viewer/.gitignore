@@ -1,0 +1,8 @@
+# cargo-ndk output, rebuilt by CI on every run.
+app/src/main/jniLibs/
+# Gradle build output.
+.gradle/
+app/build/
+build/
+# Rust build output for the standalone viewer crate.
+rust/target/

@@ -1,0 +1,40 @@
+[package]
+name = "windowstream-viewer"
+version = "0.1.0"
+edition = "2021"
+description = "window-stream Android viewer: winit/wgpu client on the shared Rust core (client / transport / codec / proto crates)"
+license = "MIT OR Apache-2.0"
+
+[lib]
+# cdylib is what cargo-ndk packages into the APK as
+# libwindowstream_viewer.so; the Kotlin ViewerActivity (GameActivity)
+# loads it by the `android.app.lib_name` manifest meta-data.
+crate-type = ["cdylib"]
+
+# Standalone crate, like android/rust: cargo-ndk builds it on its own
+# (with its own lockfile) from the GitHub Actions viewer workflow. The
+# shared crates are pulled in by path; their workspace inheritance
+# resolves against the repository root workspace, not this one.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+pollster = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+tracing = "0.1"
+window-stream-client = { path = "../../crates/client" }
+window-stream-proto = { path = "../../crates/proto" }
+window-stream-transport = { path = "../../crates/transport" }
+codec = { package = "window-stream-codec", path = "../../crates/codec" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+paranoid-android = "0.2"
+winit = { version = "0.30", features = ["android-game-activity"] }
+
+# Off-Android the winit dependency is only used to type-check the shared
+# UI code with `cargo check` on a desktop host; the Android entry point
+# is cfg-gated out there.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+winit = "0.30"
