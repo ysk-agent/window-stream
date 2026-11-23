@@ -54,3 +54,13 @@ jobs:
           grep 'acks_sent=\[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29\]' /tmp/e2e-client.log
           wait "$HOST_PID"
           grep 'done: frames_encoded=30' /tmp/e2e-host.log
+      # Real capture must fail fast on Linux: the stub backend has no
+      # windows, so --source real exits non-zero with a clear error
+      # instead of faking frames (or leaving a listener behind).
+      - name: Real-capture source fails fast on the stub backend
+        run: |
+          if ./target/debug/e2e-host --port 4434 --frames 1 --source real --window 1 > /tmp/e2e-real.log 2>&1; then
+            echo "e2e-host --source real unexpectedly succeeded on Linux" >&2
+            exit 1
+          fi
+          grep 'window 1 not found' /tmp/e2e-real.log

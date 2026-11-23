@@ -3,8 +3,10 @@
 //! The real frame path, wired for the first time:
 //!
 //! ```text
-//! codec::pattern::moving_rectangle   (frame source: dummy test pattern,
-//!        |                            no OS capture)
+//! source::FrameSource                (frame source: PatternSource by
+//!        |                            default; RealCaptureSource pulls
+//!        |                            ScreenCaptureKit BGRA on macOS
+//!        |                            and converts it to I420)
 //!        v
 //! codec::Vp9Encoder (AckGated)  -- VP9 bitstream
 //!        |
@@ -36,6 +38,26 @@
 //!
 //! Fixed decisions are untouched: WebTransport, VP9, no retransmission,
 //! no FEC, five messages, FrameAck-driven reference invalidation.
+//!
+//! Real capture (track/real-capture): the host no longer calls the
+//! dummy pattern directly. It pulls frames from a
+//! [`source::FrameSource`]; [`source::PatternSource`] is the default
+//! (and the only source that runs on Linux / in CI), while
+//! [`source::RealCaptureSource`] starts a platform capture session
+//! and feeds ScreenCaptureKit BGRA frames through the same encode →
+//! fragment → decode → sink path. The encoder is sized from the
+//! first frame that arrives, so a Retina (2x) capture flows through
+//! with no size hard-coded anywhere. See `docs/REAL_CAPTURE.md` for
+//! the on-device verification procedure; the real-device end-to-end
+//! run itself is still unverified (it needs a GUI session and the
+//! Screen Recording grant, which this VM / CI cannot provide).
+
+pub mod source;
+
+pub use source::{
+    captured_frame_to_i420, CapturedFrameSource, FrameSource, PatternSource, RealCaptureSource,
+    ReferenceFn, CAPTURE_FRAME_TIMEOUT,
+};
 
 use anyhow::{Context, Result};
 use std::time::Duration;
@@ -53,9 +75,9 @@ use window_stream_transport::{
     send_window, HostEndpoint, SelfSignedIdentity, Session,
 };
 
-use codec::pattern::moving_rectangle;
 use codec::{
-    DecoderConfig, EncodedFrame, EncoderConfig, VideoDecoder, VideoEncoder, Vp9Decoder, Vp9Encoder,
+    DecoderConfig, EncodedFrame, EncoderConfig, I420Frame, VideoDecoder, VideoEncoder, Vp9Decoder,
+    Vp9Encoder,
 };
 
 pub const E2E_WINDOW_ID: u64 = 1;
@@ -71,6 +93,27 @@ pub const INPROCESS_MAX_DATAGRAM: usize = 1200;
 pub fn encoder_config() -> EncoderConfig {
     // EncoderConfig::realtime defaults to ReferenceMode::AckGated.
     EncoderConfig::realtime(E2E_WIDTH, E2E_HEIGHT, E2E_BITRATE_KBPS)
+}
+
+/// Target bitrate for a frame size, in kbit/s.
+///
+/// The 640x360 pattern runs at 800 kbit/s; larger frames scale
+/// linearly with pixel count, clamped to 800..=8000 kbit/s. This is
+/// a v1 sizing heuristic for the host (a Retina capture at
+/// 3360x2100 needs far more than the pattern bitrate), not adaptive
+/// quality control — that stays deferred per the README.
+pub fn bitrate_for_size(width: u32, height: u32) -> u32 {
+    let pixels = u64::from(width) * u64::from(height);
+    let scaled =
+        pixels * u64::from(E2E_BITRATE_KBPS) / (u64::from(E2E_WIDTH) * u64::from(E2E_HEIGHT));
+    scaled.clamp(800, 8000) as u32
+}
+
+/// Realtime encoder config sized to the first frame a source
+/// produces. The host sizes its encoder from that frame, so a real
+/// capture's pixel size (Retina included) needs no configuration.
+pub fn encoder_config_for(width: u32, height: u32) -> EncoderConfig {
+    EncoderConfig::realtime(width, height, bitrate_for_size(width, height))
 }
 
 /// Convert a decoded codec frame into the client's I420 frame type.
@@ -206,11 +249,34 @@ pub struct HostHandle {
 }
 
 pub async fn start_host(frame_count: u64) -> Result<HostHandle> {
+    start_host_with_source(frame_count, PatternSource::new()).await
+}
+
+/// Start a host on `127.0.0.1:0` with an explicit frame source, on
+/// its own thread (see `HostHandle` for why the encoder must never
+/// live on a work-stealing pool).
+pub async fn start_host_with_source<S>(frame_count: u64, source: S) -> Result<HostHandle>
+where
+    S: FrameSource + Send + 'static,
+{
+    start_host_on("127.0.0.1:0".parse().unwrap(), frame_count, source).await
+}
+
+/// Start a host bound to `addr` with an explicit frame source, on
+/// its own thread. This is the entry point `e2e-host` uses so it can
+/// listen on a chosen `--port`.
+pub async fn start_host_on<S>(
+    addr: std::net::SocketAddr,
+    frame_count: u64,
+    source: S,
+) -> Result<HostHandle>
+where
+    S: FrameSource + Send + 'static,
+{
     let identity = SelfSignedIdentity::generate(&["localhost", "127.0.0.1", "::1"])
         .context("generate self-signed identity")?;
     let cert_hash_hex = identity.cert_hash_hex().to_string();
-    let endpoint = HostEndpoint::bind("127.0.0.1:0".parse().unwrap(), identity)
-        .context("bind host endpoint")?;
+    let endpoint = HostEndpoint::bind(addr, identity).context("bind host endpoint")?;
     let addr = endpoint.local_addr();
     info!(%addr, "e2e-host listening");
     let task = std::thread::spawn(move || {
@@ -218,7 +284,7 @@ pub async fn start_host(frame_count: u64) -> Result<HostHandle> {
             .enable_all()
             .build()
             .context("build host runtime")?;
-        rt.block_on(run_host(endpoint, frame_count))
+        rt.block_on(run_host_with_source(endpoint, frame_count, source))
     });
     Ok(HostHandle {
         addr,
@@ -228,6 +294,32 @@ pub async fn start_host(frame_count: u64) -> Result<HostHandle> {
 }
 
 pub async fn run_host(endpoint: HostEndpoint, frame_count: u64) -> Result<HostStats> {
+    run_host_with_source(endpoint, frame_count, PatternSource::new()).await
+}
+
+/// Host pipeline over WebTransport, pulling frames from `source`.
+///
+/// The first frame is pulled *before* the `Window` message is sent:
+/// its size (and the source's title) is what the client is told
+/// about the window, and it is what the encoder is sized to — so a
+/// real capture's pixel size, Retina scaling included, needs no
+/// configuration. A later frame whose size differs from the first
+/// (the window was resized mid-stream) is an error in v1: the
+/// encoder is fixed-size, so the host stops and the operator
+/// restarts it (see `docs/REAL_CAPTURE.md`).
+///
+/// `FrameSource::next_frame` blocks while waiting for the next
+/// captured frame; that is intentional — this function runs on the
+/// host's dedicated thread (see `HostHandle`), and FrameAcks are
+/// collected in the pacing window after each encode.
+pub async fn run_host_with_source<S>(
+    endpoint: HostEndpoint,
+    frame_count: u64,
+    mut source: S,
+) -> Result<HostStats>
+where
+    S: FrameSource,
+{
     let session: Session = endpoint.accept().await.context("accept session")?;
     let (mut send, mut recv) = session.accept_control().await.context("accept control")?;
 
@@ -238,16 +330,26 @@ pub async fn run_host(endpoint: HostEndpoint, frame_count: u64) -> Result<HostSt
     if hello.version != PROTOCOL_VERSION {
         anyhow::bail!("unsupported protocol version {}", hello.version);
     }
+
+    let mut stats = HostStats::default();
+    if frame_count == 0 {
+        session.close(0, "done");
+        return Ok(stats);
+    }
+    let first = source.next_frame().context("first frame from source")?;
+    let (width, height) = (first.width(), first.height());
+    let window_id = source.window_id();
+    let title = source.title().to_string();
     send_window(
         &mut send,
         &Window {
-            window_id: E2E_WINDOW_ID,
+            window_id,
             kind: WindowKind::Create as i32,
             x: 0,
             y: 0,
-            width: E2E_WIDTH,
-            height: E2E_HEIGHT,
-            title: E2E_TITLE.to_string(),
+            width,
+            height,
+            title: title.clone(),
         },
     )
     .await
@@ -257,47 +359,49 @@ pub async fn run_host(endpoint: HostEndpoint, frame_count: u64) -> Result<HostSt
     info!(
         stream = "datagram",
         max_datagram_size = max_dg,
+        window_id,
+        width,
+        height,
+        title = %title,
         "e2e-host sending VP9 frames"
     );
-    let mut encoder = Vp9Encoder::new(encoder_config()).context("create VP9 encoder")?;
-    let mut stats = HostStats::default();
+    let mut encoder =
+        Vp9Encoder::new(encoder_config_for(width, height)).context("create VP9 encoder")?;
     let mut last_ack: Option<u64> = None;
 
-    for seq in 0..frame_count {
-        let source = moving_rectangle(E2E_WIDTH, E2E_HEIGHT, seq).context("pattern frame")?;
-        let packets = encoder.encode(&source).context("VP9 encode")?;
-        for pkt in &packets {
-            let frags = fragment_frame(E2E_WINDOW_ID, pkt.seq, pkt.is_keyframe, &pkt.data, max_dg)
-                .context("fragment frame")?;
-            for f in &frags {
-                session.send_datagram(f).context("send Frame datagram")?;
-            }
-            stats.frames_sent += 1;
-            if pkt.is_keyframe {
-                stats.keyframes_sent += 1;
-            }
-            stats.encoded_bytes_total += pkt.data.len();
-            info!(
-                stream = "datagram",
-                window_id = E2E_WINDOW_ID,
-                seq = pkt.seq,
-                keyframe = pkt.is_keyframe,
-                bytes = pkt.data.len(),
-                fragments = frags.len(),
-                "sent Frame (VP9)"
+    send_encoded(
+        &session,
+        &mut encoder,
+        &first,
+        window_id,
+        max_dg,
+        &mut stats,
+    )
+    .await?;
+    pace_and_collect_acks(&session, &mut encoder, &mut stats, &mut last_ack, window_id).await;
+
+    for _ in 1..frame_count {
+        let frame = source.next_frame().context("next frame from source")?;
+        if (frame.width(), frame.height()) != (width, height) {
+            anyhow::bail!(
+                "window resized mid-stream: {}x{} -> {}x{}; restart the host \
+                 (v1 has no mid-stream encoder resize)",
+                width,
+                height,
+                frame.width(),
+                frame.height()
             );
         }
-        stats.frames_encoded += packets.len() as u64;
-
-        // Pace ~30 fps and collect FrameAcks in the pacing window; each
-        // ack tightens the encoder's reference constraint before the
-        // next frame is encoded.
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(33);
-        while let Ok(Ok(dg)) = tokio::time::timeout_at(deadline, session.receive_datagram()).await {
-            if let Ok(ack) = decode_frame_ack_datagram(&dg) {
-                apply_ack(&mut encoder, &mut stats, &mut last_ack, ack.seq);
-            }
-        }
+        send_encoded(
+            &session,
+            &mut encoder,
+            &frame,
+            window_id,
+            max_dg,
+            &mut stats,
+        )
+        .await?;
+        pace_and_collect_acks(&session, &mut encoder, &mut stats, &mut last_ack, window_id).await;
     }
     // Drain remaining acks.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -305,7 +409,7 @@ pub async fn run_host(endpoint: HostEndpoint, frame_count: u64) -> Result<HostSt
         match tokio::time::timeout_at(deadline, session.receive_datagram()).await {
             Ok(Ok(dg)) => {
                 if let Ok(ack) = decode_frame_ack_datagram(&dg) {
-                    apply_ack(&mut encoder, &mut stats, &mut last_ack, ack.seq);
+                    apply_ack(&mut encoder, &mut stats, &mut last_ack, window_id, ack.seq);
                 }
             }
             _ => break,
@@ -315,10 +419,64 @@ pub async fn run_host(endpoint: HostEndpoint, frame_count: u64) -> Result<HostSt
     Ok(stats)
 }
 
+/// Encode one source frame and send it as fragmented Frame datagrams.
+async fn send_encoded(
+    session: &Session,
+    encoder: &mut Vp9Encoder,
+    frame: &I420Frame,
+    window_id: u64,
+    max_dg: usize,
+    stats: &mut HostStats,
+) -> Result<()> {
+    let packets = encoder.encode(frame).context("VP9 encode")?;
+    for pkt in &packets {
+        let frags = fragment_frame(window_id, pkt.seq, pkt.is_keyframe, &pkt.data, max_dg)
+            .context("fragment frame")?;
+        for f in &frags {
+            session.send_datagram(f).context("send Frame datagram")?;
+        }
+        stats.frames_sent += 1;
+        if pkt.is_keyframe {
+            stats.keyframes_sent += 1;
+        }
+        stats.encoded_bytes_total += pkt.data.len();
+        info!(
+            stream = "datagram",
+            window_id,
+            seq = pkt.seq,
+            keyframe = pkt.is_keyframe,
+            bytes = pkt.data.len(),
+            fragments = frags.len(),
+            "sent Frame (VP9)"
+        );
+    }
+    stats.frames_encoded += packets.len() as u64;
+    Ok(())
+}
+
+/// Pace ~30 fps and collect FrameAcks in the pacing window; each ack
+/// tightens the encoder's reference constraint before the next frame
+/// is encoded.
+async fn pace_and_collect_acks(
+    session: &Session,
+    encoder: &mut Vp9Encoder,
+    stats: &mut HostStats,
+    last_ack: &mut Option<u64>,
+    window_id: u64,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(33);
+    while let Ok(Ok(dg)) = tokio::time::timeout_at(deadline, session.receive_datagram()).await {
+        if let Ok(ack) = decode_frame_ack_datagram(&dg) {
+            apply_ack(encoder, stats, last_ack, window_id, ack.seq);
+        }
+    }
+}
+
 fn apply_ack(
     encoder: &mut Vp9Encoder,
     stats: &mut HostStats,
     last_ack: &mut Option<u64>,
+    window_id: u64,
     seq: u64,
 ) {
     // A jump over un-acked seqs means those frames were lost at the
@@ -342,9 +500,7 @@ fn apply_ack(
     stats.acks_received.push(seq);
     info!(
         stream = "datagram",
-        window_id = E2E_WINDOW_ID,
-        seq,
-        "received FrameAck -> set_reference_constraint"
+        window_id, seq, "received FrameAck -> set_reference_constraint"
     );
 }
 
@@ -394,7 +550,7 @@ pub async fn run_client<S: FrameSink>(
         "received Window -> FrameSink::upsert_window"
     );
 
-    let stats = receive_decode_ack(&session, expected_frames, sink).await?;
+    let stats = receive_decode_ack(&session, expected_frames, sink, None).await?;
     if tokio::time::timeout(Duration::from_secs(5), session.closed())
         .await
         .is_err()
@@ -409,10 +565,18 @@ pub async fn run_client<S: FrameSink>(
 
 /// The datagram half of the client: reassemble -> decode -> sink -> ack.
 /// Shared by the network client; the in-process loop mirrors it exactly.
+///
+/// `reference` is the source's deterministic reference frame, when the
+/// host's source has one (the pattern source does; real capture does
+/// not). The network client never has one — it cannot know what the
+/// host's source produced — so it passes `None` and reports no PSNR.
+/// Only the in-process loop, which runs host and client in one
+/// process, can compare decoded frames against the source.
 async fn receive_decode_ack<S: FrameSink>(
     session: &Session,
     expected_frames: u64,
     sink: &mut S,
+    reference: Option<ReferenceFn>,
 ) -> Result<ClientStats> {
     let mut decoder = Vp9Decoder::new(DecoderConfig::default()).context("create VP9 decoder")?;
     let mut reassembler = FrameReassembler::new();
@@ -435,6 +599,7 @@ async fn receive_decode_ack<S: FrameSink>(
                 },
                 header.window_id,
                 &mut stats,
+                reference,
                 |ack| {
                     session
                         .send_datagram(encode_frame_ack_datagram(&ack))
@@ -452,18 +617,24 @@ fn decode_sink_ack(
     pkt: &EncodedFrame,
     window_id: u64,
     stats: &mut ClientStats,
+    reference: Option<ReferenceFn>,
     mut send_ack: impl FnMut(FrameAck) -> Result<()>,
 ) -> Result<()> {
     match decoder.decode(pkt) {
         Ok(frames) => {
             for f in &frames {
-                // Content check against the deterministic source pattern.
-                if let Ok(src) = moving_rectangle(f.width(), f.height(), f.seq()) {
-                    let psnr = codec::luma_psnr(&src, f);
-                    if psnr.is_finite() {
-                        let v = (psnr * 10.0) as i64;
-                        if stats.min_luma_psnr_db_x10 == 0 || v < stats.min_luma_psnr_db_x10 {
-                            stats.min_luma_psnr_db_x10 = v;
+                // Content check against the source's deterministic
+                // reference, when the source has one. Real captured
+                // frames have no reference: PSNR stays unset (0)
+                // and the frame is still submitted and acked.
+                if let Some(reference) = reference {
+                    if let Some(src) = reference(f.width(), f.height(), f.seq()) {
+                        let psnr = codec::luma_psnr(&src, f);
+                        if psnr.is_finite() {
+                            let v = (psnr * 10.0) as i64;
+                            if stats.min_luma_psnr_db_x10 == 0 || v < stats.min_luma_psnr_db_x10 {
+                                stats.min_luma_psnr_db_x10 = v;
+                            }
                         }
                     }
                 }
@@ -506,38 +677,64 @@ pub fn run_inprocess<S: FrameSink>(
     frame_count: u64,
     sink: &mut S,
 ) -> Result<(HostStats, ClientStats)> {
+    run_inprocess_with_source(frame_count, sink, PatternSource::new())
+}
+
+/// In-process loop with an explicit frame source: identical proto +
+/// codec + sink code to the network path, datagrams carried in
+/// memory. This is the verification path when localhost UDP/QUIC is
+/// blocked by the VM sandbox (sendmsg EPERM, verified with a plain
+/// UDP echo probe); it does NOT verify wtransport/QUIC itself.
+///
+/// As in `run_host_with_source`, the encoder is sized from the
+/// source's first frame, and a mid-stream size change is an error.
+pub fn run_inprocess_with_source<S: FrameSink, F: FrameSource>(
+    frame_count: u64,
+    sink: &mut S,
+    mut source: F,
+) -> Result<(HostStats, ClientStats)> {
+    let mut host = HostStats::default();
+    let mut client = ClientStats::default();
+    if frame_count == 0 {
+        return Ok((host, client));
+    }
+    let first = source.next_frame().context("first frame from source")?;
+    let (width, height) = (first.width(), first.height());
+    let window_id = source.window_id();
+    let title = source.title().to_string();
+    let reference = source.reference_fn();
     sink.upsert_window(
-        E2E_WINDOW_ID,
-        E2E_WIDTH,
-        E2E_HEIGHT,
+        window_id,
+        width,
+        height,
         WindowGeometry {
             x: 0.0,
             y: 0.0,
-            width: E2E_WIDTH as f32,
-            height: (E2E_HEIGHT + 24) as f32,
+            width: width as f32,
+            height: (height + 24) as f32,
         },
-        E2E_TITLE,
+        &title,
     )
     .map_err(|e| anyhow::anyhow!("upsert_window: {e}"))?;
+    client.window_id = window_id;
 
-    let mut encoder = Vp9Encoder::new(encoder_config()).context("create VP9 encoder")?;
+    let mut encoder =
+        Vp9Encoder::new(encoder_config_for(width, height)).context("create VP9 encoder")?;
     let mut decoder = Vp9Decoder::new(DecoderConfig::default()).context("create VP9 decoder")?;
-    let mut host = HostStats::default();
-    let mut client = ClientStats {
-        window_id: E2E_WINDOW_ID,
-        ..Default::default()
-    };
     let mut last_ack: Option<u64> = None;
     // FrameAck channel: client acks are applied to the encoder before
     // the next frame is encoded, exactly as in run_host's pacing loop.
     let mut pending_acks: Vec<u64> = Vec::new();
 
-    for seq in 0..frame_count {
-        for ack_seq in pending_acks.drain(..) {
-            apply_ack(&mut encoder, &mut host, &mut last_ack, ack_seq);
-        }
-        let source = moving_rectangle(E2E_WIDTH, E2E_HEIGHT, seq).context("pattern frame")?;
-        let packets = encoder.encode(&source).context("VP9 encode")?;
+    let encode_send_decode = |frame: &I420Frame,
+                              encoder: &mut Vp9Encoder,
+                              decoder: &mut Vp9Decoder,
+                              host: &mut HostStats,
+                              client: &mut ClientStats,
+                              pending_acks: &mut Vec<u64>,
+                              sink: &mut S|
+     -> Result<()> {
+        let packets = encoder.encode(frame).context("VP9 encode")?;
         host.frames_encoded += packets.len() as u64;
         for pkt in &packets {
             host.frames_sent += 1;
@@ -546,7 +743,7 @@ pub fn run_inprocess<S: FrameSink>(
             }
             host.encoded_bytes_total += pkt.data.len();
             let frags = fragment_frame(
-                E2E_WINDOW_ID,
+                window_id,
                 pkt.seq,
                 pkt.is_keyframe,
                 &pkt.data,
@@ -559,7 +756,7 @@ pub fn run_inprocess<S: FrameSink>(
                     client.frames_reassembled.push(header.seq);
                     let mut acked = Vec::new();
                     decode_sink_ack(
-                        &mut decoder,
+                        decoder,
                         sink,
                         &EncodedFrame {
                             data: payload.to_vec(),
@@ -567,7 +764,8 @@ pub fn run_inprocess<S: FrameSink>(
                             seq: header.seq,
                         },
                         header.window_id,
-                        &mut client,
+                        client,
+                        reference,
                         |ack| {
                             acked.push(ack.seq);
                             Ok(())
@@ -577,9 +775,60 @@ pub fn run_inprocess<S: FrameSink>(
                 }
             }
         }
+        Ok(())
+    };
+
+    encode_send_decode(
+        &first,
+        &mut encoder,
+        &mut decoder,
+        &mut host,
+        &mut client,
+        &mut pending_acks,
+        sink,
+    )?;
+    for _ in 1..frame_count {
+        for ack_seq in pending_acks.drain(..) {
+            apply_ack(&mut encoder, &mut host, &mut last_ack, window_id, ack_seq);
+        }
+        let frame = source.next_frame().context("next frame from source")?;
+        if (frame.width(), frame.height()) != (width, height) {
+            anyhow::bail!(
+                "window resized mid-stream: {}x{} -> {}x{}; restart the host \
+                 (v1 has no mid-stream encoder resize)",
+                width,
+                height,
+                frame.width(),
+                frame.height()
+            );
+        }
+        encode_send_decode(
+            &frame,
+            &mut encoder,
+            &mut decoder,
+            &mut host,
+            &mut client,
+            &mut pending_acks,
+            sink,
+        )?;
     }
     for ack_seq in pending_acks.drain(..) {
-        apply_ack(&mut encoder, &mut host, &mut last_ack, ack_seq);
+        apply_ack(&mut encoder, &mut host, &mut last_ack, window_id, ack_seq);
     }
     Ok((host, client))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bitrate_scales_with_pixels_and_clamps() {
+        assert_eq!(bitrate_for_size(640, 360), 800);
+        assert_eq!(bitrate_for_size(320, 240), 800);
+        assert_eq!(bitrate_for_size(1280, 720), 3200);
+        // Retina example from the Mac verification (3360x2100):
+        // 30.6x the pattern pixels, clamped to the 8000 cap.
+        assert_eq!(bitrate_for_size(3360, 2100), 8000);
+    }
 }
