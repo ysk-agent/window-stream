@@ -184,7 +184,16 @@ pub async fn run_client(url: &str, cert_hash_hex: &str, expected_frames: u64) ->
         }
     }
 
-    session.close(0, "done");
+    // Do not close immediately after the last FrameAck: a datagram
+    // queued just before a close can be discarded with the connection.
+    // The host closes once it has received every ack, so wait for
+    // that; fall back to closing ourselves after a grace period.
+    if tokio::time::timeout(Duration::from_secs(5), session.closed())
+        .await
+        .is_err()
+    {
+        session.close(0, "done");
+    }
     Ok(ClientStats {
         hello_version: hello.version,
         window_id: window.window_id,
