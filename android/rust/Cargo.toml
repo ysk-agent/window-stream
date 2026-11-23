@@ -1,0 +1,13 @@
+[package]
+name = "windowstream-core"
+version = "0.1.0"
+edition = "2021"
+description = "window-stream Rust core for Android, exposed to the Kotlin shell over JNI"
+license = "MIT OR Apache-2.0"
+
+[lib]
+# cdylib is what cargo-ndk packages into the APK as libwindowstream_core.so.
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = "0.21"
