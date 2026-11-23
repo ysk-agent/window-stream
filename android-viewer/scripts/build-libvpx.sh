@@ -39,6 +39,10 @@ build_one() {
     cd "$build_dir"
     export CC="$TOOLCHAIN_BIN/$cc_name"
     export CXX="$TOOLCHAIN_BIN/${cc_name}++"
+    # LD must be set explicitly: with CROSS unset, libvpx's configure
+    # defaults LD to the host `ld`, which then rejects the target
+    # objects ("file in wrong format"). The clang driver links fine.
+    export LD="$TOOLCHAIN_BIN/$cc_name"
     export AR="$TOOLCHAIN_BIN/llvm-ar"
     export AS="$TOOLCHAIN_BIN/$cc_name"
     export STRIP="$TOOLCHAIN_BIN/llvm-strip"
