@@ -1,0 +1,33 @@
+name: intel-probe
+
+# Acquisition probe: can an Intel macOS runner be picked up while
+# the arm64 macOS pool is exhausted (2026-11-23 evening, 10+
+# consecutive macos-15/macos-26 arm64 jobs died in the queue)?
+# Two one-shot jobs, one per Intel label; each just reports its
+# architecture. Timing of push -> job start is the measurement.
+
+on:
+  push:
+    branches: [session/probe-intel]
+
+permissions:
+  contents: read
+
+jobs:
+  macos-15-intel:
+    runs-on: macos-15-intel
+    timeout-minutes: 10
+    steps:
+      - run: |
+          echo "label: macos-15-intel"
+          uname -m
+          sw_vers
+
+  macos-13:
+    runs-on: macos-13
+    timeout-minutes: 10
+    steps:
+      - run: |
+          echo "label: macos-13"
+          uname -m
+          sw_vers
