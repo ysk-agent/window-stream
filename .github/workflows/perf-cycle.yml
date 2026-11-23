@@ -10,6 +10,15 @@ name: perf-cycle
 
 on:
   workflow_dispatch:
+  # GitHub only honours workflow_dispatch for workflows present on the
+  # default branch. Until this file lands on main, a push that touches
+  # the workflow itself on the perf branch is the dispatch mechanism;
+  # the paths filter keeps ordinary code pushes from triggering runs.
+  push:
+    branches:
+      - track/perf-cycle-2
+    paths:
+      - ".github/workflows/perf-cycle.yml"
 
 jobs:
   perf:
