@@ -82,6 +82,10 @@ impl ViewerApp {
 
     fn drain_events(&mut self) {
         while let Ok(event) = self.rx.try_recv() {
+            // Surface size first, as plain floats: the compositor is
+            // borrowed mutably below, so no &self calls can happen
+            // while it is alive.
+            let (sw, sh) = self.surface_logical();
             let Some(c) = &mut self.compositor else {
                 // Surface not up yet; dropping lifecycle events here
                 // would lose windows, so this cannot happen in
@@ -98,7 +102,6 @@ impl ViewerApp {
                     frame_height,
                     title,
                 } => {
-                    let (sw, sh) = self.surface_logical();
                     let geometry = fit_geometry(frame_width, frame_height, sw, sh);
                     if let Err(e) = c.upsert_window(id, frame_width, frame_height, geometry, &title)
                     {
@@ -113,7 +116,6 @@ impl ViewerApp {
                         // A frame beat its Window message (or the
                         // upsert raced surface init): create the
                         // window from the frame itself.
-                        let (sw, sh) = self.surface_logical();
                         let geometry = fit_geometry(frame.width, frame.height, sw, sh);
                         if let Err(e) = c.upsert_window(id, frame.width, frame.height, geometry, "")
                         {

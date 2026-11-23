@@ -30,7 +30,6 @@ mod pipeline;
 
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::sync::mpsc::channel;
 
 #[derive(Debug, Deserialize)]
 struct ViewerConfig {
@@ -94,7 +93,7 @@ fn android_main(android_app: winit::platform::android::activity::AndroidApp) {
     paranoid_android::init("windowstream_viewer");
     tracing::info!("window-stream viewer starting");
     let mode = load_mode(android_app.internal_data_path());
-    let (tx, rx) = channel();
+    let (tx, rx) = std::sync::mpsc::channel();
     spawn_pipeline(mode, tx);
     if let Err(e) = app::run_event_loop(rx, android_app) {
         tracing::error!(%e, "event loop failed");
