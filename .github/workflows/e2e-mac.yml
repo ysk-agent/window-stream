@@ -1,0 +1,41 @@
+name: e2e-mac
+
+# Manual dispatch only: build the macOS e2e binaries (e2e-host /
+# e2e-client / platform_probe) on a macOS arm64 runner and upload
+# them as an artifact, so the real-capture verification on a real
+# Mac (docs/REAL_CAPTURE.md) does not need a heavy local build on a
+# tethered machine. Mirrors the platform-mac / perf-cycle patterns.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build e2e binaries (macOS arm64)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libvpx, pkg-config, protobuf
+        run: |
+          brew install libvpx pkg-config protobuf
+          CLT_LIBCLANG="/Library/Developer/CommandLineTools/usr/lib"
+          if [ -f "$CLT_LIBCLANG/libclang.dylib" ]; then
+            echo "LIBCLANG_PATH=$CLT_LIBCLANG" >> "$GITHUB_ENV"
+          else
+            brew install llvm
+            echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+          fi
+      - name: Build e2e + platform binaries (release)
+        run: cargo build --release -p window-stream-e2e --bin e2e-host --bin e2e-client -p window-stream-platform --bin platform_probe
+      - name: Collect binaries
+        run: |
+          mkdir -p dist
+          cp target/release/e2e-host target/release/e2e-client target/release/platform_probe dist/
+          ls -la dist/
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-binaries-macos-arm64
+          path: dist/
+          if-no-files-found: error
