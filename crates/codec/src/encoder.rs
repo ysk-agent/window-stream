@@ -191,6 +191,20 @@ impl Vp9Encoder {
             if config.threads != 1 {
                 enc.control_warn(sys::VP9E_SET_ROW_MT, 1, "VP9E_SET_ROW_MT");
             }
+            if config.tile_columns_log2 > 0 {
+                enc.control_warn(
+                    sys::VP9E_SET_TILE_COLUMNS,
+                    config.tile_columns_log2 as c_int,
+                    "VP9E_SET_TILE_COLUMNS",
+                );
+            }
+            if config.screen_content {
+                enc.control_warn(
+                    sys::VP9E_SET_TUNE_CONTENT,
+                    sys::VP9E_CONTENT_SCREEN,
+                    "VP9E_SET_TUNE_CONTENT(screen)",
+                );
+            }
 
             // Scratch image, allocated once and refilled per frame.
             let img_ptr = sys::vpx_img_alloc(
