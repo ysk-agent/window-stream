@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package windowstream.v1;
+
+// Control messages for window-stream v1.
+//
+// Only three message types are carried as protobuf (see README.md):
+// Hello and Window travel on the reliable control stream, FrameAck
+// travels as a datagram whose payload is a protobuf encoding.
+// Frame and Input are NOT protobuf; they use the small hand-rolled
+// binary headers in `datagram.rs` (hot path, fixed layout).
+
+// Client -> host, on the control stream. Protocol version only;
+// everything else in v1 is fixed (VP9, 8-bit 4:2:0).
+message Hello {
+  uint32 version = 1;
+}
+
+// Host -> client, on the reliable control stream.
+// Create / update / destroy are one message type.
+message Window {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    CREATE = 1;
+    UPDATE = 2;
+    DESTROY = 3;
+  }
+  uint64 window_id = 1;
+  Kind kind = 2;
+  // Geometry in host desktop coordinates. Width/height are 0 for DESTROY.
+  int32 x = 3;
+  int32 y = 4;
+  uint32 width = 5;
+  uint32 height = 6;
+  string title = 7;
+}
+
+// Client -> host, as a datagram (kind byte 0x03, see datagram.rs).
+// Sequence number of the last successfully decoded frame. The host
+// encodes subsequent frames referencing only acknowledged frames
+// (reference invalidation; lost frames are never retransmitted).
+message FrameAck {
+  uint64 window_id = 1;
+  uint64 seq = 2;
+}

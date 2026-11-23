@@ -1,0 +1,27 @@
+name: core
+
+# Core track (proto / transport / dummy) build + tests.
+# The integration test needs UDP loopback, which some sandboxes block;
+# GitHub-hosted runners provide it, so this workflow is the reference
+# verification for the Hello -> Window -> Frame -> FrameAck round trip.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cargo-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc (for prost-build)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build
+        run: cargo build --workspace
+      - name: Test
+        run: cargo test --workspace -- --nocapture

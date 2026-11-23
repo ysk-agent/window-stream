@@ -1,0 +1,23 @@
+[package]
+name = "window-stream-dummy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Synthetic host/client for window-stream protocol verification without OS capture"
+
+[dependencies]
+anyhow.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+window-stream-proto = { path = "../proto" }
+window-stream-transport = { path = "../transport" }
+
+[[bin]]
+name = "dummy-host"
+path = "src/bin/dummy_host.rs"
+
+[[bin]]
+name = "dummy-client"
+path = "src/bin/dummy_client.rs"
