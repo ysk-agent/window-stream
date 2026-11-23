@@ -1,0 +1,22 @@
+[package]
+name = "window-stream-client"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "window-stream client: wgpu compositing of per-window I420 textures, demo mode, local window management and input capture"
+
+# Standalone for the client track: this empty [workspace] table detaches the
+# crate from any parent workspace so `cargo build` works inside crates/client
+# before the root workspace manifest exists. See README.md in this crate for
+# the integration steps (remove this table and add the crate to the root
+# workspace members when the workspace track lands).
+[workspace]
+
+[dependencies]
+winit = "0.30"
+wgpu = "0.20"
+pollster = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
