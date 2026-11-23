@@ -7,7 +7,9 @@ name: e2e-session
 # no tailnet secret). One runner acquisition serves many
 # fetch/build/test cycles, instead of one acquisition per build.
 #
-# Start:  gh workflow run e2e-session.yml --ref track/capture-scale
+# Start:  push to the session/start branch (workflow_dispatch
+#         becomes usable once this file reaches the default
+#         branch; until then the push trigger is the start).
 # Drive:  push jobs/<id>-<name>.job (bash) to the printed
 #         session-bus-<run id> branch; read results/<id>.state and
 #         results/<id>.log from the same branch.
@@ -22,6 +24,13 @@ on:
         description: "End the session after this many minutes without job activity"
         required: false
         default: "60"
+  # workflow_dispatch only sees workflows registered on the default
+  # branch, and this workflow is not on main yet — so a push to the
+  # dedicated session/start branch is the working start trigger.
+  # Push to session/start ONLY to start a session; the concurrency
+  # group below keeps it to one live session.
+  push:
+    branches: [session/start]
 
 permissions:
   contents: write
