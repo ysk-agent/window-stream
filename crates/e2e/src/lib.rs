@@ -293,14 +293,9 @@ pub async fn run_host(endpoint: HostEndpoint, frame_count: u64) -> Result<HostSt
         // ack tightens the encoder's reference constraint before the
         // next frame is encoded.
         let deadline = tokio::time::Instant::now() + Duration::from_millis(33);
-        loop {
-            match tokio::time::timeout_at(deadline, session.receive_datagram()).await {
-                Ok(Ok(dg)) => {
-                    if let Ok(ack) = decode_frame_ack_datagram(&dg) {
-                        apply_ack(&mut encoder, &mut stats, &mut last_ack, ack.seq);
-                    }
-                }
-                _ => break,
+        while let Ok(Ok(dg)) = tokio::time::timeout_at(deadline, session.receive_datagram()).await {
+            if let Ok(ack) = decode_frame_ack_datagram(&dg) {
+                apply_ack(&mut encoder, &mut stats, &mut last_ack, ack.seq);
             }
         }
     }

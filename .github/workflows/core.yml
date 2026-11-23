@@ -29,3 +29,22 @@ jobs:
         run: cargo build --workspace
       - name: Test
         run: cargo test --workspace -- --nocapture
+      # Real-network e2e: VP9 over WebTransport (not the in-process
+      # loop, which cargo test covers). Runs here because GitHub-hosted
+      # runners allow UDP loopback, unlike some sandboxes.
+      - name: E2E network round trip (VP9 over WebTransport)
+        run: |
+          timeout 90 ./target/debug/e2e-host --port 4433 --frames 30 > /tmp/e2e-host.log 2>&1 &
+          HOST_PID=$!
+          for _ in $(seq 1 50); do
+            grep -q '^cert-hash: ' /tmp/e2e-host.log && break
+            sleep 0.2
+          done
+          HASH=$(grep '^cert-hash: ' /tmp/e2e-host.log | awk '{print $2}')
+          test -n "$HASH"
+          RUST_LOG=info timeout 60 ./target/debug/e2e-client --url https://127.0.0.1:4433 --cert-hash "$HASH" --frames 30 > /tmp/e2e-client.log 2>&1
+          grep 'done(network):' /tmp/e2e-client.log
+          grep 'decoded=\[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29\]' /tmp/e2e-client.log
+          grep 'acks_sent=\[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29\]' /tmp/e2e-client.log
+          wait "$HOST_PID"
+          grep 'done: frames_encoded=30' /tmp/e2e-host.log
