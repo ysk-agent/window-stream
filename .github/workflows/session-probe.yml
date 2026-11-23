@@ -1,0 +1,31 @@
+name: session-probe
+
+# Linux probe for the e2e-session git-bus machinery: same loop
+# script as .github/workflows/e2e-session.yml, but on
+# ubuntu-latest with a 3-minute idle lifetime, to verify that a
+# session can be acquired and driven end to end while the macOS
+# arm64 pool is exhausted. Probe only — the e2e binaries for the
+# Mac measurements still require the macOS session.
+#
+# Start: push to the session/probe-linux branch.
+
+on:
+  push:
+    branches: [session/probe-linux]
+
+permissions:
+  contents: write
+
+jobs:
+  session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Session loop (git-bus, Linux probe)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IDLE_MINUTES: "3"
+          POLL_SECS: "10"
+        run: bash .github/scripts/e2e-session-loop.sh
