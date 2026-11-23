@@ -28,16 +28,6 @@ use objc2_screen_capture_kit::{SCStreamErrorCode, SCStreamErrorDomain};
 
 use crate::types::{PlatformError, WindowId};
 
-/// "domain (code): description" for one NSError.
-pub fn describe_ns_error(error: &NSError) -> String {
-    format!(
-        "{} ({}): {}",
-        error.domain(),
-        error.code(),
-        error.localizedDescription()
-    )
-}
-
 /// Classify a live NSError.
 pub fn classify_ns_error(error: &NSError, window: Option<WindowId>) -> PlatformError {
     let (domain, code, description) = (

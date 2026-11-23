@@ -10,7 +10,8 @@
 //! The display is the one containing most of the window, and the
 //! default output size is the window's point size multiplied by
 //! that content's backing scale factor (`SCShareableContentInfo
-//! .pointPixelScale`), so Retina windows capture at full pixel
+//! .pointPixelScale`, macOS 14+ -- macOS 13 falls back to 1.0, see
+//! [`backing_scale`]), so Retina windows capture at full pixel
 //! resolution instead of half.
 //!
 //! Frames arrive as `CMSampleBuffer`s wrapping a `CVPixelBuffer` on
@@ -43,7 +44,9 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, AnyThread, DefinedClass};
 use objc2_core_media::{CMSampleBuffer, CMTime};
-use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
+use objc2_foundation::{
+    NSArray, NSError, NSObject, NSObjectProtocol, NSOperatingSystemVersion, NSProcessInfo,
+};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate,
     SCStreamOutput, SCStreamOutputType,
@@ -195,10 +198,20 @@ unsafe fn copy_frame(
 // The output object only copies pixels and forwards the owned frame
 // to the worker thread. Conversion and the caller callback run there.
 
+/// Frames the SCK queue may hold for the worker thread. Depth 2
+/// (one frame in flight, one queued) matches the depth-1 policy in
+/// spirit: a slow consumer drops stale frames instead of letting
+/// the queue grow without bound. The channel is bounded on purpose
+/// -- an unbounded `mpsc` channel would accumulate frames forever
+/// if the callback (or the conversion) stalled.
+const WORKER_CHANNEL_DEPTH: usize = 2;
+
 pub struct OutputIvars {
-    sender: std::sync::mpsc::Sender<CapturedFrame>,
+    sender: std::sync::mpsc::SyncSender<CapturedFrame>,
     window_id: WindowId,
     sequence: AtomicU64,
+    /// Frames dropped because the worker channel was full.
+    dropped: AtomicU64,
     /// Logged once if the worker thread has gone away.
     worker_gone_logged: AtomicBool,
 }
@@ -230,13 +243,29 @@ define_class!(
             // SAFETY: sample_buffer is live for this callback.
             let frame = unsafe { copy_frame(sample_buffer, ivars.window_id, sequence) };
             if let Some(frame) = frame {
-                if ivars.sender.send(frame).is_err()
-                    && !ivars.worker_gone_logged.swap(true, Ordering::Relaxed)
-                {
-                    tracing::error!(
-                        window_id = %ivars.window_id,
-                        "capture worker thread is gone; frames are being dropped"
-                    );
+                match ivars.sender.try_send(frame) {
+                    Ok(()) => {}
+                    Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                        // Worker is behind: drop the stale frame
+                        // (depth-1 policy) rather than blocking the
+                        // SCK queue, which would stall capture.
+                        let dropped = ivars.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                        tracing::debug!(
+                            window_id = %ivars.window_id,
+                            sequence,
+                            dropped,
+                            "worker channel full; dropping frame"
+                        );
+                    }
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_))
+                        if !ivars.worker_gone_logged.swap(true, Ordering::Relaxed) =>
+                    {
+                        tracing::error!(
+                            window_id = %ivars.window_id,
+                            "capture worker thread is gone; frames are being dropped"
+                        );
+                    }
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
                 }
             }
         }
@@ -253,7 +282,7 @@ impl StreamOutput {
         want_i420: bool,
         callback: FrameCallback,
     ) -> Result<Retained<Self>> {
-        let (tx, rx) = std::sync::mpsc::channel::<CapturedFrame>();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<CapturedFrame>(WORKER_CHANNEL_DEPTH);
         let mut callback = callback;
         let spawn = std::thread::Builder::new()
             .name("window-stream-convert".into())
@@ -291,6 +320,7 @@ impl StreamOutput {
             sender: tx,
             window_id,
             sequence: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
             worker_gone_logged: AtomicBool::new(false),
         });
         // SAFETY: NSObject init on a freshly allocated object.
@@ -325,9 +355,16 @@ define_class!(
         fn stream_didStopWithError(&self, _stream: &SCStream, error: &NSError) {
             let classified = classify_ns_error(error, None);
             tracing::error!("SCStream stopped with error: {classified}");
-            if let Ok(mut guard) = self.ivars().error.lock() {
-                *guard = Some(classified);
-            }
+            // Recover from poisoning like every other Mutex site in
+            // this crate: the recorded error is still usable.
+            let mut guard = match self.ivars().error.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    tracing::error!("stream-error Mutex poisoned; recovering state");
+                    poisoned.into_inner()
+                }
+            };
+            *guard = Some(classified);
         }
 
         #[unsafe(method(streamDidBecomeActive:))]
@@ -381,6 +418,43 @@ pub struct MacCaptureSession {
 // threads (the `Send` use) never accesses it concurrently.
 unsafe impl Send for MacCaptureSession {}
 
+/// Backing scale factor (points -> pixels) for a filter's content.
+///
+/// `SCShareableContent::infoForFilter` / `SCShareableContentInfo`
+/// is macOS 14.0+; on macOS 13 the class method does not exist, and
+/// messaging it would raise an unrecognized-selector exception that
+/// objc2 does not translate, aborting the process. So the call is
+/// guarded by an OS-version check and macOS 13 falls back to 1.0
+/// (point-sized frames -- correct, just not Retina-sharp). The
+/// crate's documented prerequisite stays macOS 13+; only the scale
+/// refinement needs 14.
+fn backing_scale(filter: &SCContentFilter) -> f64 {
+    let at_least_14 =
+        NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
+            majorVersion: 14,
+            minorVersion: 0,
+            patchVersion: 0,
+        });
+    if !at_least_14 {
+        tracing::warn!(
+            "macOS < 14: pointPixelScale unavailable; capturing at point size (scale 1.0)"
+        );
+        return 1.0;
+    }
+    // SAFETY: filter is a live SCContentFilter; infoForFilter is
+    // available on macOS 14+, which the check above established.
+    let scale = unsafe {
+        let info = SCShareableContent::infoForFilter(filter);
+        info.pointPixelScale() as f64
+    };
+    if scale > 0.0 && scale.is_finite() {
+        scale
+    } else {
+        tracing::warn!("SCShareableContentInfo pointPixelScale was {scale}; assuming 1.0");
+        1.0
+    }
+}
+
 impl MacCaptureSession {
     pub fn start(
         window_id: WindowId,
@@ -411,18 +485,7 @@ impl MacCaptureSession {
                 (config.width as usize, config.height as usize)
             } else {
                 let frame = window.frame();
-                let scale = {
-                    let info = SCShareableContent::infoForFilter(&filter);
-                    let s = info.pointPixelScale() as f64;
-                    if s > 0.0 && s.is_finite() {
-                        s
-                    } else {
-                        tracing::warn!(
-                            "SCShareableContentInfo pointPixelScale was {s}; assuming 1.0"
-                        );
-                        1.0
-                    }
-                };
+                let scale = backing_scale(&filter);
                 (
                     ((frame.size.width * scale).round() as usize).max(1),
                     ((frame.size.height * scale).round() as usize).max(1),
@@ -516,7 +579,13 @@ impl CaptureSession for MacCaptureSession {
     }
 
     fn stream_error(&self) -> Option<PlatformError> {
-        self.stream_error.lock().ok().and_then(|g| g.clone())
+        match self.stream_error.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::error!("stream-error Mutex poisoned; recovering state");
+                poisoned.into_inner().clone()
+            }
+        }
     }
 
     fn stop(&mut self) -> Result<()> {

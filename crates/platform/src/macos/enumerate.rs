@@ -164,24 +164,16 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
     with_shareable_content(|windows, _| windows.iter().map(|w| window_info(w)).collect())
 }
 
-/// Fetch (and retain) the `SCWindow` for `id`, for capture setup.
-pub fn fetch_window(id: WindowId) -> Result<SendWindow> {
-    let found = with_shareable_content(move |windows, _| {
-        windows
-            .iter()
-            .find(|w| unsafe { w.windowID() } == id.0)
-            .map(|w| SendWindow(w.clone()))
-    })?;
-    found.ok_or(PlatformError::WindowNotFound(id))
-}
-
 /// Fetch the window for `id` together with the display that contains
 /// most of it. The display is needed for the
 /// `SCContentFilter(initWithDisplay:includingWindows:)` filter used
 /// by capture, and for the window's backing scale factor.
 pub fn fetch_window_with_display(id: WindowId) -> Result<(SendWindow, SendDisplay)> {
-    let found = with_shareable_content(move |windows, displays| {
-        let window = windows.iter().find(|w| unsafe { w.windowID() } == id.0)?;
+    let (found, window_found) = with_shareable_content(move |windows, displays| {
+        let window = match windows.iter().find(|w| unsafe { w.windowID() } == id.0) {
+            Some(w) => w,
+            None => return (None, false),
+        };
         // SAFETY: property read on a live SCWindow.
         let frame = unsafe { window.frame() };
         let window_rect = Rect::new(
@@ -193,7 +185,7 @@ pub fn fetch_window_with_display(id: WindowId) -> Result<(SendWindow, SendDispla
         // Pick the display with the largest overlap; fall back to the
         // first display if the window overlaps none (e.g. a window
         // whose frame is stale or off-screen).
-        let display = displays
+        let display = match displays
             .iter()
             .max_by(|a, b| {
                 let area = |d: &SCDisplay| {
@@ -208,8 +200,25 @@ pub fn fetch_window_with_display(id: WindowId) -> Result<(SendWindow, SendDispla
                     .partial_cmp(&area(b))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
-            .or_else(|| displays.first())?;
-        Some((SendWindow(window.clone()), SendDisplay(display.clone())))
+            .or_else(|| displays.first())
+        {
+            Some(d) => d,
+            // The window exists but there is no display at all: that
+            // is an OS-state problem, not a missing window.
+            None => return (None, true),
+        };
+        (
+            Some((SendWindow(window.clone()), SendDisplay(display.clone()))),
+            true,
+        )
     })?;
-    found.ok_or(PlatformError::WindowNotFound(id))
+    match (found, window_found) {
+        (Some(pair), _) => Ok(pair),
+        (None, true) => Err(PlatformError::Os(
+            "SCShareableContent returned a window but no displays; \
+             cannot build a display filter"
+                .into(),
+        )),
+        (None, false) => Err(PlatformError::WindowNotFound(id)),
+    }
 }

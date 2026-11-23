@@ -8,14 +8,19 @@
 //! on macOS version, Input Monitoring); see `docs/PERMISSIONS.md`.
 //!
 //! Coordinate systems: [`PointerEvent`] coordinates are top-left
-//! origin (the same global space as [`crate::types::WindowInfo::bounds`]), but
-//! Quartz global coordinates -- what `CGEvent` wants -- are
-//! bottom-left origin. Every pointer event therefore goes through
-//! [`to_quartz`], which flips `y` against the top of the virtual
-//! desktop (`y_quartz = global_top - y`). Getting this wrong flips
-//! every click vertically, which is exactly the bug this conversion
-//! exists to prevent; step 4 of `docs/MACOS_VERIFICATION.md` checks
-//! it on hardware.
+//! origin (the same global space as [`crate::types::WindowInfo::bounds`]),
+//! with the **main display's top-left corner as the origin** -- a
+//! point on a display above the main display has a negative `y`
+//! (see `types.rs`). Quartz global coordinates -- what `CGEvent`
+//! wants -- are bottom-left origin with the same main-display
+//! origin. Every pointer event therefore goes through
+//! [`to_quartz`], which flips `y` against the main display's height
+//! only (`y_quartz = main_height - y`); flipping against the top of
+//! the whole virtual desktop would be wrong for a display stacked
+//! above the main one. Getting this wrong flips every click
+//! vertically, which is exactly the bug this conversion exists to
+//! prevent; step 4 of `docs/MACOS_VERIFICATION.md` checks it on
+//! hardware, including a window on a second display.
 //!
 //! Pressed-state tracking: `release_all` must not be a no-op (the
 //! trait promises no stuck keys), so this module tracks pressed keys
@@ -46,33 +51,20 @@ fn post(event: CGEvent) {
     event.post(CGEventTapLocation::HID);
 }
 
-/// Top of the virtual desktop in Quartz coordinates: the highest
-/// `origin.y + height` over all active displays.
-fn global_top_quartz() -> Option<f64> {
-    let ids = CGDisplay::active_displays().ok()?;
-    let mut top = f64::NEG_INFINITY;
-    for id in ids {
-        let bounds = CGDisplay::new(id).bounds();
-        top = top.max(bounds.origin.y + bounds.size.height);
-    }
-    if top.is_finite() {
-        Some(top)
-    } else {
-        None
-    }
-}
-
-/// Convert a top-left-origin point to Quartz (bottom-left) coordinates.
+/// Convert a top-left-origin point (main display's top-left corner
+/// as origin) to Quartz (bottom-left) coordinates.
 ///
-/// Falls back to the main display's height when the display list is
-/// unavailable; in that case multi-display `y` may be off, but the
-/// common single-display case stays correct.
+/// The flip is against the main display's height only: Quartz and
+/// this crate share the main display as the origin, so
+/// `y_quartz = main_top - y` where `main_top` is the main display's
+/// top edge in Quartz coordinates (`origin.y + height`, normally
+/// just its height). A display stacked above the main display has
+/// negative `y` in our coordinates, and this formula maps it
+/// correctly; flipping against the virtual desktop's top would
+/// shift such clicks up by that display's height.
 fn to_quartz(x: f64, y: f64) -> CGPoint {
-    let top = global_top_quartz().unwrap_or_else(|| {
-        let bounds = CGDisplay::main().bounds();
-        bounds.origin.y + bounds.size.height
-    });
-    CGPoint::new(x, top - y)
+    let bounds = CGDisplay::main().bounds();
+    CGPoint::new(x, bounds.origin.y + bounds.size.height - y)
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +81,21 @@ static PRESSED: OnceLock<Mutex<PressedState>> = OnceLock::new();
 
 fn pressed() -> &'static Mutex<PressedState> {
     PRESSED.get_or_init(|| Mutex::new(PressedState::default()))
+}
+
+/// Lock the pressed-state Mutex, recovering from poisoning instead
+/// of silently dropping the update (a poisoned Mutex means a
+/// previous holder panicked; the state itself is still usable).
+/// Every lock site in this module goes through here so the poison
+/// policy is the same everywhere.
+fn lock_pressed() -> std::sync::MutexGuard<'static, PressedState> {
+    match pressed().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::error!("input pressed-state Mutex poisoned; recovering state");
+            poisoned.into_inner()
+        }
+    }
 }
 
 pub fn inject_key(event: KeyEvent) -> Result<()> {
@@ -112,7 +119,8 @@ pub fn inject_key(event: KeyEvent) -> Result<()> {
     }
     post(cg);
     // Record only on success: the event reached the OS.
-    if let Ok(mut state) = pressed().lock() {
+    {
+        let mut state = lock_pressed();
         if event.down {
             state.keys.insert(event.key_code);
         } else {
@@ -148,9 +156,7 @@ pub fn inject_pointer(event: PointerEvent) -> Result<()> {
             )
             .map_err(|_| PlatformError::Os("CGEventCreateMouseEvent (move) failed".into()))?;
             post(cg);
-            if let Ok(mut state) = pressed().lock() {
-                state.last_position = Some((x, y));
-            }
+            lock_pressed().last_position = Some((x, y));
         }
         PointerEvent::ButtonDown { button, x, y } => {
             let kind = match button {
@@ -161,7 +167,8 @@ pub fn inject_pointer(event: PointerEvent) -> Result<()> {
             let cg = CGEvent::new_mouse_event(source()?, kind, to_quartz(x, y), cg_button(button)?)
                 .map_err(|_| PlatformError::Os("CGEventCreateMouseEvent (down) failed".into()))?;
             post(cg);
-            if let Ok(mut state) = pressed().lock() {
+            {
+                let mut state = lock_pressed();
                 state.buttons.insert(button);
                 state.last_position = Some((x, y));
             }
@@ -175,7 +182,8 @@ pub fn inject_pointer(event: PointerEvent) -> Result<()> {
             let cg = CGEvent::new_mouse_event(source()?, kind, to_quartz(x, y), cg_button(button)?)
                 .map_err(|_| PlatformError::Os("CGEventCreateMouseEvent (up) failed".into()))?;
             post(cg);
-            if let Ok(mut state) = pressed().lock() {
+            {
+                let mut state = lock_pressed();
                 state.buttons.remove(&button);
                 state.last_position = Some((x, y));
             }
@@ -204,30 +212,19 @@ pub fn inject_pointer(event: PointerEvent) -> Result<()> {
 
 /// Release everything tracked as pressed: synthesise a key-up for
 /// every key still down and a button-up for every button still down
-/// (at the last known pointer position). Best effort -- failures are
-/// logged, not returned, because this runs on teardown where there
-/// is nothing useful the caller could do with the error; the state
-/// is cleared regardless so a later call does not re-release.
+/// (at the last known pointer position). Best effort -- per-event
+/// failures are logged, not returned, because this runs on teardown
+/// where there is nothing useful the caller could do with the error;
+/// the state is cleared regardless so a later call does not
+/// re-release. The event source is created once up front
+/// (`CGEventSource` is cheap to clone, so it is cloned per event);
+/// if even that fails, there is nothing to post with and the error
+/// is returned.
 pub fn release_all() -> Result<()> {
-    let state = match pressed().lock() {
-        Ok(mut guard) => std::mem::take(&mut *guard),
-        Err(poisoned) => {
-            tracing::error!("input pressed-state Mutex poisoned; recovering state");
-            std::mem::take(&mut *poisoned.into_inner())
-        }
-    };
+    let state = std::mem::take(&mut *lock_pressed());
+    let src = source()?;
     for key_code in state.keys {
-        match CGEvent::new_keyboard_event(
-            match source() {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(key_code, "release_all: no event source: {e}");
-                    continue;
-                }
-            },
-            key_code,
-            false,
-        ) {
+        match CGEvent::new_keyboard_event(src.clone(), key_code, false) {
             Ok(cg) => post(cg),
             Err(_) => tracing::warn!(key_code, "release_all: key-up event creation failed"),
         }
@@ -239,21 +236,10 @@ pub fn release_all() -> Result<()> {
                 PointerButton::Right => CGEventType::RightMouseUp,
                 _ => CGEventType::OtherMouseUp,
             };
-            let Ok(cg_button) = cg_button(button) else {
+            let Ok(button) = cg_button(button) else {
                 continue;
             };
-            match CGEvent::new_mouse_event(
-                match source() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!("release_all: no event source: {e}");
-                        break;
-                    }
-                },
-                kind,
-                to_quartz(x, y),
-                cg_button,
-            ) {
+            match CGEvent::new_mouse_event(src.clone(), kind, to_quartz(x, y), button) {
                 Ok(cg) => post(cg),
                 Err(_) => tracing::warn!(?button, "release_all: button-up event creation failed"),
             }

@@ -9,6 +9,7 @@
 | `cargo check --target aarch64-apple-darwin` | Linux VM, cross target | **Passed** after the NEEDS-FIXES round (the m1 target architecture). Same caveat as above. |
 | `cargo clippy` (Linux + both darwin targets), `cargo doc --no-deps` | Linux VM | **Passed**, zero warnings, after the NEEDS-FIXES round. |
 | NEEDS-FIXES round (B1 + S1-S10 + optional items) | Linux VM, cross-checked only | All items addressed in the fix commit on `track/platform-mac` (see git log). The Y-flip fix, filter switch, Retina scaling, worker-thread conversion, delegate, error classification, input-state tracking and 60s timeout are implemented and type-checked; none of them has run on a Mac. |
+| Fix cycle 2 (multi-display Y-flip, macOS 14 scale guard + optional cleanups) | Linux VM, Rust 1.100.0 | **Passed.** `to_quartz` now flips against the main display height only; `backing_scale` is guarded by an OS-version check (macOS 13 falls back to scale 1.0); worker channel bounded at depth 2 with stale-frame drops, Mutex poison policy unified (recover everywhere), dead `fetch_window` / `describe_ns_error` removed, `release_all` creates its event source once, empty-display case returns an OS error instead of `WindowNotFound`. `cargo check` + `cargo test` (4 tests), both darwin `cargo check`s, clippy on all three targets, `cargo doc` and `cargo fmt --check` all clean, zero warnings. Still unverified on a real Mac. |
 | Window enumeration on a real Mac | -- | **Not done.** |
 | Per-window capture on a real Mac | -- | **Not done.** |
 | Input injection on a real Mac | -- | **Not done.** |
@@ -19,6 +20,11 @@ Prerequisites: Rust stable (`rustup`), macOS 13 or newer
 (ScreenCaptureKit per-window capture needs 12.3+; this crate is
 developed against 13+ behaviour), Xcode Command Line Tools
 (`xcode-select --install`).
+
+Note: the Retina backing-scale refinement (`pointPixelScale`)
+uses a macOS 14.0+ API and is guarded by an OS-version check;
+on macOS 13 capture still works but the default size falls back
+to point size (scale 1.0).
 
 ```sh
 git clone https://github.com/ysk-agent/window-stream.git
@@ -96,10 +102,11 @@ cat capture-out/frames.txt
   is step 4 above).
 * Retina / scaled displays (S2 fix): the default output size is
   now the window's point size multiplied by
-  `SCShareableContentInfo.pointPixelScale`. Confirm in step 3 that
-  `frames.txt` on a Retina display reports about 2x the point size
-  from `--list` (e.g. a 800x600 pt window -> ~1600x1200 px frames),
-  not the point size itself.
+  `SCShareableContentInfo.pointPixelScale` (macOS 14+; macOS 13
+  falls back to scale 1.0, see the prerequisites note above).
+  Confirm in step 3 that `frames.txt` on a Retina display reports
+  about 2x the point size from `--list` (e.g. a 800x600 pt window
+  -> ~1600x1200 px frames), not the point size itself.
 * Filter choice (S1 fix): capture now uses a display filter
   including exactly the target window
   (`initWithDisplay:includingWindows:`), after the earlier
