@@ -52,4 +52,8 @@ dependencies {
     // GameActivity: the native-activity glue the Rust `android_main`
     // entry point (winit android-game-activity backend) plugs into.
     implementation("androidx.games:games-activity:2.0.2")
+    // GameActivity descends from AppCompatActivity, but games-activity
+    // does not expose appcompat as an api dependency — without this
+    // line the AppCompat theme fails AAPT linking.
+    implementation("androidx.appcompat:appcompat:1.7.0")
 }
