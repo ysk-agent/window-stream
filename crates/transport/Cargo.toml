@@ -1,0 +1,17 @@
+[package]
+name = "window-stream-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WebTransport (wtransport / quinn) session wrapper for window-stream"
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+prost.workspace = true
+rcgen.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+window-stream-proto = { path = "../proto" }
+wtransport.workspace = true
