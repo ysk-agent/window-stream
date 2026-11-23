@@ -44,7 +44,10 @@ build_one() {
     # objects ("file in wrong format"). The clang driver links fine.
     export LD="$TOOLCHAIN_BIN/$cc_name"
     export AR="$TOOLCHAIN_BIN/llvm-ar"
-    export AS="$TOOLCHAIN_BIN/$cc_name"
+    # AS gets "-c": libvpx's armv7 .asm.S rule invokes $(AS) without
+    # -c (a standalone `as` always emits an object), but the clang
+    # driver would try to link an executable and fail on `main`.
+    export AS="$TOOLCHAIN_BIN/$cc_name -c"
     export STRIP="$TOOLCHAIN_BIN/llvm-strip"
     export RANLIB="$TOOLCHAIN_BIN/llvm-ranlib"
     export NM="$TOOLCHAIN_BIN/llvm-nm"
