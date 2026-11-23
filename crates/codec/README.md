@@ -113,12 +113,27 @@ linked library, and links via `pkg-config`. The `vp8_enc_control_id`
 values bindgen cannot see (the enum is referenced only from macros) are
 pinned as constants in `src/sys.rs` with their source noted.
 
+**bindgen version matters (2026-11-23 correction).** An earlier
+diagnosis blamed libvpx 1.16 for breaking this FFI on Ubuntu 26.04;
+that was wrong. The cfg struct layouts are identical in libvpx 1.14
+and 1.16 (`vpx_codec_enc_cfg` is 504 bytes in both). The actual cause
+was bindgen 0.71.1 with libclang 22: LLVM 22 changed
+`clang_getTypeDeclaration()` to return forward declarations, and
+bindgen < 0.72.1 silently generated the cfg structs as opaque types
+(`pub struct vpx_codec_enc_cfg { pub _address: u8 }`), so every field
+access failed at compile time. This crate therefore requires
+**bindgen >= 0.72.1**, enables bindgen's layout tests, asserts the
+cfg struct sizes in `src/sys.rs`, and logs the libvpx and libclang
+versions at build time — so the next toolchain skew fails loudly and
+legibly instead of masquerading as a libvpx layout change.
+
 ## Build prerequisites (Linux)
 
 Toolchain requirements: **Rust >= 1.77** (the crate's `rust-version`;
-bindgen 0.71's MSRV — older toolchains fail because `rustc-hash` 2.x
-requires >= 1.77), **libvpx >= 1.14** (headers + library), clang /
-libclang for bindgen.
+older toolchains fail because `rustc-hash` 2.x requires >= 1.77),
+**libvpx >= 1.14** (headers + library; 1.16 verified), clang /
+libclang for bindgen, and **bindgen >= 0.72.1** (see the FFI note
+above — 0.71.x mis-generates bindings under libclang 22).
 
 ```sh
 # libvpx headers + library, pkg-config, a C toolchain, libclang for bindgen
@@ -127,8 +142,11 @@ sudo apt-get install -y libvpx-dev pkg-config clang libclang-dev build-essential
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-Verified in this environment with Ubuntu 24.04 packages: libvpx
-1.14.0 (`libvpx.so.9`), clang 18, bindgen 0.71. If `LIBCLANG_PATH` is not
+Originally verified in this environment with Ubuntu 24.04 packages:
+libvpx 1.14.0 (`libvpx.so.9`), clang 18, bindgen 0.71. The bindgen
+0.72.1 fix was additionally verified against libclang 22 and libvpx
+1.16 headers (Ubuntu 26.04), where 0.71.1 generated opaque bindings.
+If `LIBCLANG_PATH` is not
 picked up automatically, set it, e.g.
 `LIBCLANG_PATH=/usr/lib/llvm-18/lib`.
 

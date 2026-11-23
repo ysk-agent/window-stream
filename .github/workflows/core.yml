@@ -11,11 +11,17 @@ on:
 
 jobs:
   cargo-test:
-    # Pinned to 24.04: its libvpx is 1.14, the version crates/codec's
-    # bindgen-generated FFI was developed and verified against.
-    # ubuntu-latest (26.04) ships libvpx 1.16, whose codec config
-    # structs no longer match the codec crate's field usage.
-    runs-on: ubuntu-24.04
+    # Correction to the diagnosis in b088fe0 ("pin to ubuntu-24.04"):
+    # the Ubuntu 26.04 failure was NOT a libvpx 1.16 layout change.
+    # vpx_codec_enc_cfg / vpx_codec_dec_cfg are byte-identical between
+    # libvpx 1.14 and 1.16 (enc_cfg is 504 bytes in both). The real
+    # cause was bindgen 0.71.1 x libclang 22: LLVM 22 changed
+    # clang_getTypeDeclaration() so bindgen silently emitted the cfg
+    # structs as opaque types, and every field access failed (E0609).
+    # Fixed by bindgen 0.72.1; layout tripwires live in
+    # crates/codec/build.rs and crates/codec/src/sys.rs. Full write-up:
+    # the libvpx-1.16 investigation report (2026-11-23). No pin needed.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
