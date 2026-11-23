@@ -33,7 +33,7 @@ jobs:
 
       - name: Install libvpx
         run: |
-          brew install libvpx pkg-config
+          brew install libvpx pkg-config protobuf
           # bindgen needs a findable libclang; the Xcode CLT copy is
           # the first choice, Homebrew llvm is the fallback.
           CLT_LIBCLANG="/Library/Developer/CommandLineTools/usr/lib"
