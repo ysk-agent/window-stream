@@ -14,7 +14,8 @@ ScreenCaptureKit (per-window, BGRA)
 
 This is the part of track/real-capture that **cannot** run on the
 development VM or in CI: it needs a GUI session and the Screen
-Recording grant. Everything up to it — the `FrameSource` seam, the
+Recording grant. It was executed end to end on a real Mac on
+2026-11-23 — see "Verification record" below. Everything up to it — the `FrameSource` seam, the
 BGRA -> I420 conversion, the encode / fragment / decode / ack path
 fed by captured frames — is verified in-process on Linux / CI
 (`crates/e2e/tests/inprocess.rs`, `bgra_captured_frames_end_to_end_inprocess`).
@@ -28,8 +29,49 @@ fed by captured frames — is verified in-process on Linux / CI
 | BGRA -> I420 conversion (unit tests, platform crate) | Verified on Linux + CI |
 | Captured BGRA frames -> VP9 -> WebTransport datagrams -> decode -> sink, in-process | Verified on Linux + CI (this track) |
 | Pattern source -> VP9 -> real WebTransport -> decode -> sink (network path) | Verified in CI (core workflow) |
-| **Real capture -> VP9 -> real WebTransport -> decode -> client display, on a Mac** | **Not verified — this procedure** |
+| **Real capture -> VP9 -> real WebTransport -> decode -> client display, on a Mac** | **Verified 2026-11-23 (m1, macOS 15.7.7) — see "Verification record" below** |
+| Split configuration (host on Mac, client on the Muse VM over the tailnet) | Not verified — the VM cannot originate UDP to tailnet addresses (its tailnet access is TCP via a CONNECT proxy; `sendmsg` returns EPERM), attempted once 2026-11-23 |
 | `platform_probe` capture of a window that is resized / closed mid-capture; permission revocation mid-session | Not verified (v1 has no handling; see "Known limits") |
+
+## Verification record — 2026-11-23 (m1, MacBook-Air-3, macOS 15.7.7)
+
+The full procedure below was executed end to end on the real Mac.
+Binaries were built by the `e2e-mac` GitHub Actions workflow
+(macos-15, run 45143647422, from commit `4156923` = main `1658494`
+plus the workflow) and transferred as a 6.2 MB tarball — the Mac is
+tethered and its Data volume had 3.6 GiB free, so no on-Mac build
+was attempted. SHA-256 of every transferred file was verified on
+the Mac against the bundle's `SHA256SUMS`. The host was always
+launched inside the GUI session via `.command` files (Terminal);
+the Screen Recording grant given earlier for the probe covered the
+new binaries without a new prompt.
+
+- Pattern smoke test (SSH-launched, no capture): host + client on
+  loopback, 20/20 frames encoded / sent / decoded, acks 0..19,
+  0 errors.
+- **Real capture, headless client:** Arc browser window
+  (1680x1050 pt, captured at 3360x2100 px), 30 frames — host:
+  `frames_encoded=30 frames_sent=30 keyframes_sent=17
+  encoded_bytes_total=3573597`, 30 FrameAcks received; client:
+  30 reassembled / 30 decoded / `decode_errors=0` / 30 acks sent /
+  `sink_frames=30`; both processes exit 0. Capture sequence numbers
+  skip (0, 95, 102, ...) because the depth-1 channel keeps only the
+  newest frame while a 7 MP frame encodes (~70–100 ms vs the 33 ms
+  capture interval), and most frames were keyframes
+  (`invalidations=28`): the ack-driven reference rule invalidates
+  whenever an ack lags the last sent sequence. Correct, but at
+  full-screen Retina size the stream is keyframe-heavy — a pacing /
+  resolution trade-off to revisit, not a correctness failure.
+- **Real capture, display client:** Terminal window
+  (570x371 pt → 1140x742 px), 30 frames — host: 30 encoded / sent,
+  8 keyframes, 82,517 bytes, 30 acks; client:
+  `display done: frames_submitted_to_compositor=30`, exit 0. A
+  `screencapture` taken during the hold shows the client window
+  displaying the decoded Terminal window (evidence kept with the
+  run logs outside the repo).
+- The `e2e-mac` workflow also ran the e2e test suite on macOS:
+  7 unit + 2 integration tests passed (the stub-backend test is
+  `cfg(not(macos))` by design).
 
 ## Prerequisites
 

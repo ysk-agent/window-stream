@@ -13,9 +13,10 @@ The e2e crate wires them together: a `FrameSource` (dummy pattern by
 default, real ScreenCaptureKit capture with `--source real` on macOS)
 feeds VP9 encode -> Frame datagrams -> decode -> client display, with
 FrameAck driving the encoder reference constraint. The in-process and
-CI network paths are verified; the real-device end-to-end run (capture
-on a Mac through to client display) is still unverified — see
-`docs/REAL_CAPTURE.md` for the procedure.
+CI network paths are verified, and the real-device end-to-end run
+(capture on a Mac through to client display) was verified on
+2026-11-23 — see `docs/REAL_CAPTURE.md` for the procedure and the
+verification record.
 
 ## Goal
 
