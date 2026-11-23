@@ -3503,6 +3503,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "window-stream-e2e"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "pollster",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wgpu",
+ "window-stream-client",
+ "window-stream-codec",
+ "window-stream-proto",
+ "window-stream-transport",
+ "winit",
+]
+
+[[package]]
 name = "window-stream-platform"
 version = "0.1.0"
 dependencies = [
