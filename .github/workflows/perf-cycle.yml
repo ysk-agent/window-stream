@@ -1,0 +1,88 @@
+name: perf-cycle
+
+# Measurement-only workflow for the perf harness (crates/perf).
+# Manual dispatch only — it never runs on push/PR. Builds perf-cycle on
+# an unthrottled hosted runner and uploads the raw JSONL runs as an
+# artifact; aggregation happens offline, per environment, never mixed.
+#
+# Runners are shared and noisy: every scenario set is repeated and the
+# analysis compares medians across repetitions, not single runs.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  perf:
+    name: perf (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install libvpx (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install libvpx pkg-config
+          # bindgen needs a findable libclang; the Xcode CLT copy is
+          # the first choice, Homebrew llvm is the fallback.
+          CLT_LIBCLANG="/Library/Developer/CommandLineTools/usr/lib"
+          if [ -f "$CLT_LIBCLANG/libclang.dylib" ]; then
+            echo "LIBCLANG_PATH=$CLT_LIBCLANG" >> "$GITHUB_ENV"
+          else
+            brew install llvm
+            echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+          fi
+
+      - name: Install libvpx (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libvpx-dev protobuf-compiler pkg-config
+
+      - name: Record environment
+        run: |
+          mkdir -p results
+          {
+            echo "os: ${{ matrix.os }}"
+            uname -a
+            if [ "$RUNNER_OS" = "macOS" ]; then
+              sw_vers
+              echo "ncpu: $(sysctl -n hw.ncpu)"
+              sysctl -n machdep.cpu.brand_string
+            else
+              echo "ncpu: $(nproc)"
+              grep -m1 'model name' /proc/cpuinfo || true
+            fi
+            echo "libvpx (pkg-config): $(pkg-config --modversion vpx)"
+            rustc --version
+            cargo --version
+          } | tee results/env.txt
+
+      - name: Build perf harness
+        run: cargo build --release -p window-stream-perf
+
+      - name: Run measurement sets (repeated; medians taken offline)
+        run: |
+          BIN=./target/release/perf-cycle
+          for r in 1 2 3; do
+            $BIN --label "unpaced_r$r" --out "results/unpaced_r$r.jsonl"
+          done
+          for r in 1 2; do
+            $BIN --no-screen-content --label "noscreen_r$r" --out "results/noscreen_r$r.jsonl"
+            $BIN --paced --label "paced_r$r" --out "results/paced_r$r.jsonl"
+            $BIN --multi --windows 3 --enc-threads 1 --label "multi_thr1_r$r" --out "results/multi_thr1_r$r.jsonl"
+            $BIN --multi --windows 3 --enc-threads 2 --label "multi_thr2_r$r" --out "results/multi_thr2_r$r.jsonl"
+          done
+          $BIN --sweep --out results/sweep.jsonl
+          ls -l results/
+
+      - name: Upload raw results
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results-${{ matrix.os }}
+          path: results/
+          if-no-files-found: error

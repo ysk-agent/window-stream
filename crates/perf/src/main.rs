@@ -199,7 +199,7 @@ struct Args {
     enc_threads: Option<u32>,
     dec_threads: Option<u32>,
     tile_columns: Option<u32>,
-    screen_content: bool,
+    screen_content: Option<bool>,
     label: String,
     out: Option<String>,
     paced: bool,
@@ -215,7 +215,7 @@ fn parse_args() -> Args {
         enc_threads: None,
         dec_threads: None,
         tile_columns: None,
-        screen_content: false,
+        screen_content: None,
         label: "run".into(),
         out: None,
         paced: false,
@@ -245,7 +245,11 @@ fn parse_args() -> Args {
                 i += 2;
             }
             "--screen-content" => {
-                a.screen_content = true;
+                a.screen_content = Some(true);
+                i += 1;
+            }
+            "--no-screen-content" => {
+                a.screen_content = Some(false);
                 i += 1;
             }
             "--tile-columns" => {
@@ -291,8 +295,8 @@ fn encoder_cfg(args: &Args, w: u32, h: u32, bitrate: u32, cpu_used: i32) -> Enco
     if let Some(tc) = args.tile_columns {
         cfg.tile_columns_log2 = tc;
     }
-    if args.screen_content {
-        cfg.screen_content = true;
+    if let Some(sc) = args.screen_content {
+        cfg.screen_content = sc;
     }
     cfg
 }
