@@ -8,10 +8,10 @@ name: platform-mac
 on:
   push:
     branches:
+      - main
       - track/platform-mac-ci
     paths:
       - "crates/platform/**"
-      - ".github/workflows/platform-mac.yml"
   workflow_dispatch:
 
 jobs:
