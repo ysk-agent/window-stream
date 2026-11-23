@@ -17,6 +17,7 @@
 
 pub mod capture;
 pub mod enumerate;
+pub mod error;
 pub mod input;
 
 use crate::traits::CaptureSession;
@@ -24,9 +25,12 @@ use crate::traits::FrameCallback;
 use crate::traits::{InputInjector, PlatformBackend, WindowCapturer, WindowEnumerator};
 use crate::types::{CaptureConfig, KeyEvent, PointerEvent, Result, WindowId, WindowInfo};
 
-/// The macOS backend. Stateless: every enumeration performs a fresh
-/// `SCShareableContent` query and every capture builds its own
-/// `SCStream`, so there is no cached window state to go stale.
+/// The macOS backend. Enumeration and capture are stateless: every
+/// enumeration performs a fresh `SCShareableContent` query and every
+/// capture builds its own `SCStream`, so there is no cached window
+/// state to go stale. Input injection is the exception: pressed
+/// keys/buttons are tracked process-wide (see `input.rs`) so that
+/// `release_all` can synthesise the matching releases.
 #[derive(Debug, Default)]
 pub struct MacBackend;
 

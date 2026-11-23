@@ -25,7 +25,7 @@ objc2-core-foundation = { version = "0.3", features = ["CFString"] }
 objc2-core-media = { version = "0.3", features = ["CMSampleBuffer", "CMTime"] }
 objc2-core-video = { version = "0.3", features = ["CVPixelBuffer", "CVImageBuffer", "CVBuffer"] }
 objc2-foundation = { version = "0.3", features = ["NSError", "NSString", "NSArray", "NSObject"] }
-objc2-screen-capture-kit = { version = "0.3", features = ["SCShareableContent", "SCStream"] }
+objc2-screen-capture-kit = { version = "0.3", features = ["SCError", "SCShareableContent", "SCStream"] }
 
 [dev-dependencies]
 

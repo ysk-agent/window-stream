@@ -32,12 +32,22 @@ pub fn bgra_to_i420(
     let y_stride = w;
     let c_stride = cw;
     let mut out = vec![0u8; y_stride * h + 2 * c_stride * ch];
+    // Pre-fill with limited-range black, so a truncated source
+    // (see the row loop below) leaves black instead of Y=0.
+    out[..y_stride * h].fill(16);
+    out[y_stride * h..].fill(128);
 
     let (y_plane, rest) = out.split_at_mut(y_stride * h);
     let (u_plane, v_plane) = rest.split_at_mut(c_stride * ch);
 
     for row in 0..h {
-        let src_row = &src[row * src_stride..row * src_stride + w * 4];
+        // Defensive: a short / truncated source buffer must not panic
+        // (this runs on a worker thread, but a panic there would still
+        // kill the conversion of every later frame). Missing rows are
+        // treated as black.
+        let Some(src_row) = src.get(row * src_stride..row * src_stride + w * 4) else {
+            continue;
+        };
         for col in 0..w {
             let px = &src_row[col * 4..col * 4 + 4];
             let (b, g, r) = (px[0] as i32, px[1] as i32, px[2] as i32);
@@ -105,6 +115,18 @@ mod tests {
         let (out, _) = bgra_to_i420(&src, 8, 2, 2);
         assert_eq!(&out[0..4], &[235, 235, 235, 235]);
         assert_eq!(out[4], 128);
+    }
+
+    #[test]
+    fn truncated_input_does_not_panic() {
+        // 2 rows claimed, only 1 row present: row 0 converts, row 1
+        // stays pre-filled black (Y=16); the function must not panic.
+        // Callers pass correctly-sized buffers in practice.
+        let src = [0u8, 0, 255, 255, 0, 0, 0, 0];
+        let (out, _) = bgra_to_i420(&src, 8, 2, 2);
+        assert_eq!(out[0], 82); // red pixel, row 0
+        assert_eq!(&out[2..4], &[16, 16]); // missing row 1: black
+        assert_eq!(out.len(), 6);
     }
 
     #[test]

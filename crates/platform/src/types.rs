@@ -133,7 +133,7 @@ pub struct CapturedFrame {
 }
 
 /// Mouse / pointer buttons.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PointerButton {
     Left,
     Right,
@@ -143,7 +143,8 @@ pub enum PointerButton {
 
 /// Pointer input. Coordinates are in points, top-left origin, in the
 /// same global space as [`WindowInfo::bounds`]; backends translate to
-/// whatever the OS expects.
+/// whatever the OS expects (macOS Quartz coordinates are bottom-left,
+/// so the macOS backend flips `y` -- see `src/macos/input.rs`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum PointerEvent {
     Move {
@@ -160,6 +161,10 @@ pub enum PointerEvent {
         x: f64,
         y: f64,
     },
+    /// Scroll wheel at (`x`, `y`). Sign convention (Quartz wheel
+    /// events, to be confirmed on hardware): `dy > 0` scrolls up,
+    /// `dx > 0` scrolls right. `dx`/`dy` are in pixels for the
+    /// macOS backend (it requests `ScrollEventUnit::PIXEL`).
     Scroll {
         x: f64,
         y: f64,
@@ -198,7 +203,7 @@ impl KeyEvent {
 }
 
 /// Errors every backend can return.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum PlatformError {
     #[error("permission denied: {0}")]
     PermissionDenied(String),

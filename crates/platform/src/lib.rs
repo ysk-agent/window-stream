@@ -34,7 +34,8 @@ pub use types::{
 
 /// Create the backend for the current OS.
 ///
-/// macOS: [`macos::MacBackend`]. Everywhere else: [`stub::StubBackend`].
+/// macOS: `macos::MacBackend` (only compiled on macOS).
+/// Everywhere else: [`stub::StubBackend`].
 pub fn create_backend() -> Box<dyn PlatformBackend> {
     #[cfg(target_os = "macos")]
     {

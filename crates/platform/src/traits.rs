@@ -3,8 +3,9 @@
 //! Everything OS-specific in window-stream sits behind these traits
 //! (adapter form, see `docs/IMPLEMENTATION.md` in the repository root).
 //! The core protocol, transport and codec crates never see an OS type:
-//! they enumerate [`WindowInfo`], receive [`CapturedFrame`]s through a
-//! callback, and inject [`KeyEvent`] / [`PointerEvent`]s.
+//! they enumerate [`crate::types::WindowInfo`], receive
+//! [`crate::types::CapturedFrame`]s through a callback, and inject
+//! [`crate::types::KeyEvent`] / [`crate::types::PointerEvent`]s.
 //!
 //! Threading: capture backends invoke the frame callback on their own
 //! (OS-owned) queue/thread. Callbacks must therefore be `Send`, must
@@ -23,7 +24,7 @@ pub trait WindowEnumerator: Send + Sync {
     /// List all shareable / capturable windows.
     ///
     /// On macOS this is one `SCShareableContent` query. It may fail
-    /// with [`PlatformError::PermissionDenied`] when Screen Recording
+    /// with [`crate::types::PlatformError::PermissionDenied`] when Screen Recording
     /// permission has not been granted (see `docs/PERMISSIONS.md`).
     fn list_windows(&self) -> Result<Vec<WindowInfo>>;
 
@@ -38,9 +39,28 @@ pub trait WindowEnumerator: Send + Sync {
 /// Dropping the session (or calling [`CaptureSession::stop`]) stops
 /// the underlying OS capture. There is at most one session per window
 /// in v1.
+///
+/// v1 has no push notification for geometry changes or for a stream
+/// dying, so the host must (a) poll [`WindowEnumerator::list_windows`]
+/// to notice window moves / resizes / closes, and (b) treat frame
+/// silence -- no frame for more than a few frame intervals -- as a
+/// failure, and check [`CaptureSession::stream_error`] to see whether
+/// the backend observed the stream stop (macOS reports the
+/// `SCStreamDelegate` error there). A future version may add an
+/// event channel; until then polling + silence detection is the
+/// contract, not a workaround.
 pub trait CaptureSession: Send {
     fn window_id(&self) -> WindowId;
     fn stop(&mut self) -> Result<()>;
+
+    /// The error the backend observed if the OS stream died
+    /// (macOS: `SCStreamDelegate stream:didStopWithError:`), or
+    /// `None` if no stream death has been observed. Poll this when
+    /// frames go silent; backends that cannot observe stream death
+    /// return `None` and frame silence is the only signal.
+    fn stream_error(&self) -> Option<crate::types::PlatformError> {
+        None
+    }
 }
 
 /// Starts per-window captures.
@@ -66,6 +86,12 @@ pub trait InputInjector: Send + Sync {
     /// Release every key/button. Used on session teardown so a lost
     /// key-up can never leave a stuck key on the host (the protocol
     /// additionally sends periodic input-state snapshots).
+    ///
+    /// Backends that track pressed state (macOS does, process-wide)
+    /// synthesise the matching key-up / button-up events here.
+    /// Backends that cannot track state document that this is a
+    /// no-op and the session layer is responsible for explicit
+    /// releases instead.
     fn release_all(&self) -> Result<()> {
         Ok(())
     }
