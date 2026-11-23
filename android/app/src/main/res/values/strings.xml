@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Window Stream</string>
+    <string name="capture_channel_name">Screen capture</string>
+    <string name="capture_channel_desc">Shown while the screen capture foreground service is running</string>
+    <string name="capture_notification_title">Window Stream capture</string>
+    <string name="capture_notification_text">MediaProjection is active (diagnostics build)</string>
+</resources>
