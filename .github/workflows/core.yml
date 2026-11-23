@@ -11,7 +11,11 @@ on:
 
 jobs:
   cargo-test:
-    runs-on: ubuntu-latest
+    # Pinned to 24.04: its libvpx is 1.14, the version crates/codec's
+    # bindgen-generated FFI was developed and verified against.
+    # ubuntu-latest (26.04) ships libvpx 1.16, whose codec config
+    # structs no longer match the codec crate's field usage.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
