@@ -15,7 +15,11 @@ pub enum FrameError {
     #[error("unknown window id {0}")]
     UnknownWindow(WindowId),
     #[error("invalid I420 frame for {width}x{height}: {reason}")]
-    InvalidFrame { width: u32, height: u32, reason: String },
+    InvalidFrame {
+        width: u32,
+        height: u32,
+        reason: String,
+    },
 }
 
 /// What a frame producer (transport+codec, or the demo generator) needs.

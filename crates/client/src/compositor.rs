@@ -33,10 +33,17 @@ const INITIAL_QUAD_CAPACITY: usize = 256;
 fn quad(x0: f32, y0: f32, x1: f32, y1: f32, surf_w: f32, surf_h: f32) -> [Vertex; 6] {
     let cx = |px: f32| (px / surf_w) * 2.0 - 1.0;
     let cy = |py: f32| 1.0 - (py / surf_h) * 2.0;
-    let v = |px: f32, py: f32, u: f32, v_: f32| Vertex { pos: [cx(px), cy(py)], uv: [u, v_] };
+    let v = |px: f32, py: f32, u: f32, v_: f32| Vertex {
+        pos: [cx(px), cy(py)],
+        uv: [u, v_],
+    };
     [
-        v(x0, y0, 0.0, 0.0), v(x1, y0, 1.0, 0.0), v(x0, y1, 0.0, 1.0),
-        v(x1, y0, 1.0, 0.0), v(x1, y1, 1.0, 1.0), v(x0, y1, 0.0, 1.0),
+        v(x0, y0, 0.0, 0.0),
+        v(x1, y0, 1.0, 0.0),
+        v(x0, y1, 0.0, 1.0),
+        v(x1, y0, 1.0, 0.0),
+        v(x1, y1, 1.0, 1.0),
+        v(x0, y1, 0.0, 1.0),
     ]
 }
 
@@ -81,7 +88,11 @@ impl Compositor {
         tracing::info!(adapter = ?adapter.get_info(), "wgpu adapter");
         let (device, queue) = adapter
             .request_device(
-                &wgpu::DeviceDescriptor { label: Some("client-device"), required_features: wgpu::Features::empty(), required_limits: wgpu::Limits::downlevel_defaults() },
+                &wgpu::DeviceDescriptor {
+                    label: Some("client-device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::downlevel_defaults(),
+                },
                 None,
             )
             .await?;
@@ -99,7 +110,11 @@ impl Compositor {
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: caps.alpha_modes.first().copied().ok_or_else(|| anyhow::anyhow!("surface reports no alpha modes"))?,
+            alpha_mode: caps
+                .alpha_modes
+                .first()
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("surface reports no alpha modes"))?,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -108,9 +123,25 @@ impl Compositor {
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("i420-layout"),
             entries: &[
-                tex_entry(0), tex_entry(1), tex_entry(2),
-                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
-                wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                tex_entry(0),
+                tex_entry(1),
+                tex_entry(2),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -141,25 +172,37 @@ impl Compositor {
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
                 count: None,
             }],
         });
         let solid_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("solid-bind"),
             layout: &solid_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: solid_uniform.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: solid_uniform.as_entire_binding(),
+            }],
         });
-        queue.write_buffer(&solid_uniform, 0, bytemuck::cast_slice(&[0.20f32, 0.23, 0.28, 1.0]));
+        queue.write_buffer(
+            &solid_uniform,
+            0,
+            bytemuck::cast_slice(&[0.20f32, 0.23, 0.28, 1.0]),
+        );
         let solid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("solid-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("solid.wgsl").into()),
         });
-        let solid_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("solid-pipeline-layout"),
-            bind_group_layouts: &[&solid_layout],
-            push_constant_ranges: &[],
-        });
+        let solid_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("solid-pipeline-layout"),
+                bind_group_layouts: &[&solid_layout],
+                push_constant_ranges: &[],
+            });
         let solid_pipeline = make_pipeline(&device, &solid_pipeline_layout, &solid_shader, format);
 
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -170,10 +213,19 @@ impl Compositor {
         });
 
         Ok(Self {
-            surface, device, queue, config, scale_factor,
-            pipeline, solid_pipeline, solid_bind_group, solid_uniform,
-            bind_layout, sampler,
-            vertex_buffer, quad_capacity: INITIAL_QUAD_CAPACITY,
+            surface,
+            device,
+            queue,
+            config,
+            scale_factor,
+            pipeline,
+            solid_pipeline,
+            solid_bind_group,
+            solid_uniform,
+            bind_layout,
+            sampler,
+            vertex_buffer,
+            quad_capacity: INITIAL_QUAD_CAPACITY,
             windows: Vec::new(),
         })
     }
@@ -195,8 +247,18 @@ impl Compositor {
 
     fn ensure_textures(&mut self, idx: usize) {
         if self.windows[idx].textures.is_none() {
-            let (w, h) = (self.windows[idx].frame_width, self.windows[idx].frame_height);
-            let tex = GpuWindowTextures::new(&self.device, &self.queue, &self.bind_layout, &self.sampler, w, h);
+            let (w, h) = (
+                self.windows[idx].frame_width,
+                self.windows[idx].frame_height,
+            );
+            let tex = GpuWindowTextures::new(
+                &self.device,
+                &self.queue,
+                &self.bind_layout,
+                &self.sampler,
+                w,
+                h,
+            );
             self.windows[idx].textures = Some(tex);
         }
     }
@@ -215,13 +277,24 @@ impl Compositor {
 
     /// Topmost window under a logical point, if any.
     pub fn hit(&self, px: f32, py: f32) -> Option<WindowId> {
-        self.windows.iter().rev().find(|w| w.geometry.contains(px, py)).map(|w| w.id)
+        self.windows
+            .iter()
+            .rev()
+            .find(|w| w.geometry.contains(px, py))
+            .map(|w| w.id)
     }
 
-    pub fn set_colorimetry(&mut self, id: WindowId, colorimetry: crate::remote_window::Colorimetry) -> bool {
+    pub fn set_colorimetry(
+        &mut self,
+        id: WindowId,
+        colorimetry: crate::remote_window::Colorimetry,
+    ) -> bool {
         match self.windows.iter_mut().find(|w| w.id == id) {
             Some(w) => match &mut w.textures {
-                Some(tex) => { tex.set_colorimetry(&self.queue, colorimetry); true }
+                Some(tex) => {
+                    tex.set_colorimetry(&self.queue, colorimetry);
+                    true
+                }
                 None => false,
             },
             None => false,
@@ -241,7 +314,9 @@ impl Compositor {
             Err(wgpu::SurfaceError::Timeout) => return Ok(()),
             Err(e) => return Err(e.into()),
         };
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         // Logical surface size for clip-space conversion.
         let (sw, sh) = (
@@ -265,21 +340,41 @@ impl Compositor {
         let mut verts: Vec<Vertex> = Vec::with_capacity(quads_needed * 6);
         for win in self.windows.iter().filter(|w| w.textures.is_some()) {
             let g = &win.geometry;
-            verts.extend_from_slice(&quad(g.x, g.y + TITLE_BAR_H, g.x + g.width, g.y + g.height, sw, sh));
+            verts.extend_from_slice(&quad(
+                g.x,
+                g.y + TITLE_BAR_H,
+                g.x + g.width,
+                g.y + g.height,
+                sw,
+                sh,
+            ));
             verts.extend_from_slice(&quad(g.x, g.y, g.x + g.width, g.y + TITLE_BAR_H, sw, sh));
         }
         if !verts.is_empty() {
-            self.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&verts));
+            self.queue
+                .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&verts));
         }
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame"),
+            });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("composite"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.08, g: 0.09, b: 0.11, a: 1.0 }), store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.08,
+                            g: 0.09,
+                            b: 0.11,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
@@ -315,14 +410,24 @@ impl FrameSink for Compositor {
         title: &str,
     ) -> Result<(), FrameError> {
         if frame_width == 0 || frame_height == 0 {
-            return Err(FrameError::InvalidFrame { width: frame_width, height: frame_height, reason: "zero frame size".into() });
+            return Err(FrameError::InvalidFrame {
+                width: frame_width,
+                height: frame_height,
+                reason: "zero frame size".into(),
+            });
         }
         if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
             win.geometry = geometry;
             win.title = title.to_string();
             win.set_frame_size(frame_width, frame_height); // drops textures on change
         } else {
-            self.windows.push(RemoteWindow::new(id, title, geometry, frame_width, frame_height));
+            self.windows.push(RemoteWindow::new(
+                id,
+                title,
+                geometry,
+                frame_width,
+                frame_height,
+            ));
         }
         let idx = self.windows.iter().position(|w| w.id == id).unwrap();
         self.ensure_textures(idx);
@@ -343,12 +448,18 @@ impl FrameSink for Compositor {
             return Err(FrameError::UnknownWindow(id));
         };
         // Host-side resize: follow the frame, recreating textures. Never panic.
-        if self.windows[idx].frame_width != frame.width || self.windows[idx].frame_height != frame.height {
+        if self.windows[idx].frame_width != frame.width
+            || self.windows[idx].frame_height != frame.height
+        {
             tracing::info!(window_id = id, old = ?(self.windows[idx].frame_width, self.windows[idx].frame_height), new = ?(frame.width, frame.height), "frame size changed; recreating textures");
             self.windows[idx].set_frame_size(frame.width, frame.height);
         }
         self.ensure_textures(idx);
-        self.windows[idx].textures.as_ref().unwrap().upload(&self.queue, frame)
+        self.windows[idx]
+            .textures
+            .as_ref()
+            .unwrap()
+            .upload(&self.queue, frame)
     }
 }
 
@@ -356,7 +467,11 @@ fn tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
         count: None,
     }
 }
@@ -383,7 +498,11 @@ fn make_pipeline(
         fragment: Some(wgpu::FragmentState {
             module: shader,
             entry_point: "fs_main",
-            targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL })],
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
             compilation_options: Default::default(),
         }),
         primitive: wgpu::PrimitiveState::default(),

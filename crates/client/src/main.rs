@@ -67,10 +67,18 @@ impl App {
     /// scaled to the remote frame size). Falls back to raw logical cursor
     /// position when there is no target.
     fn content_coords(&self, target: Option<u64>) -> (Option<u64>, f32, f32) {
-        let Some(c) = &self.compositor else { return (None, self.cursor.0, self.cursor.1) };
+        let Some(c) = &self.compositor else {
+            return (None, self.cursor.0, self.cursor.1);
+        };
         match target.and_then(|id| c.window(id)) {
             Some(w) => {
-                let (x, y) = to_content_coords(&w.geometry, w.frame_width, w.frame_height, self.cursor.0, self.cursor.1);
+                let (x, y) = to_content_coords(
+                    &w.geometry,
+                    w.frame_width,
+                    w.frame_height,
+                    self.cursor.0,
+                    self.cursor.1,
+                );
                 (Some(w.id), x, y)
             }
             None => (None, self.cursor.0, self.cursor.1),
@@ -94,22 +102,63 @@ impl ApplicationHandler for App {
             .with_inner_size(LogicalSize::new(900, 640));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         self.scale_factor = window.scale_factor();
-        let mut compositor = pollster::block_on(Compositor::new(window.clone())).expect("wgpu init");
+        let mut compositor =
+            pollster::block_on(Compositor::new(window.clone())).expect("wgpu init");
         // Demo windows go through the FrameSink seam, exactly like real
         // Window messages from a host will.
         let demo_windows = [
-            (1, "Demo Window A", WindowGeometry { x: 40.0, y: 40.0, width: 320.0, height: 264.0 }, 320, 240),
-            (2, "Demo Window B", WindowGeometry { x: 220.0, y: 140.0, width: 280.0, height: 224.0 }, 280, 200),
-            (3, "Demo Window C", WindowGeometry { x: 120.0, y: 300.0, width: 240.0, height: 204.0 }, 240, 180),
+            (
+                1,
+                "Demo Window A",
+                WindowGeometry {
+                    x: 40.0,
+                    y: 40.0,
+                    width: 320.0,
+                    height: 264.0,
+                },
+                320,
+                240,
+            ),
+            (
+                2,
+                "Demo Window B",
+                WindowGeometry {
+                    x: 220.0,
+                    y: 140.0,
+                    width: 280.0,
+                    height: 224.0,
+                },
+                280,
+                200,
+            ),
+            (
+                3,
+                "Demo Window C",
+                WindowGeometry {
+                    x: 120.0,
+                    y: 300.0,
+                    width: 240.0,
+                    height: 204.0,
+                },
+                240,
+                180,
+            ),
         ];
         for (id, title, geometry, fw, fh) in demo_windows {
-            compositor.upsert_window(id, fw, fh, geometry, title).expect("upsert demo window");
+            compositor
+                .upsert_window(id, fw, fh, geometry, title)
+                .expect("upsert demo window");
         }
         self.compositor = Some(compositor);
         self.window = Some(window);
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WinitWindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _id: WinitWindowId,
+        event: WindowEvent,
+    ) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -143,26 +192,39 @@ impl ApplicationHandler for App {
                     }
                     Some(drag.window_id)
                 } else {
-                    self.compositor.as_ref().and_then(|c| c.hit(self.cursor.0, self.cursor.1))
+                    self.compositor
+                        .as_ref()
+                        .and_then(|c| c.hit(self.cursor.0, self.cursor.1))
                 };
                 let (wid, rx, ry) = self.content_coords(target);
-                self.log_input(InputEvent::PointerMove { window_id: wid, x: rx, y: ry });
+                self.log_input(InputEvent::PointerMove {
+                    window_id: wid,
+                    x: rx,
+                    y: ry,
+                });
                 if self.drag.is_some() {
                     self.request_redraw();
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                let hit = self.compositor.as_ref().and_then(|c| c.hit(self.cursor.0, self.cursor.1));
+                let hit = self
+                    .compositor
+                    .as_ref()
+                    .and_then(|c| c.hit(self.cursor.0, self.cursor.1));
                 // During a drag, button events stay with the dragged window.
                 let target = self.drag.as_ref().map(|d| d.window_id).or(hit);
                 let log_tuple = self.content_coords(target);
                 if state == ElementState::Pressed && button == MouseButton::Left {
                     if let Some(id) = hit {
-                        let in_title = self.compositor.as_ref()
+                        let in_title = self
+                            .compositor
+                            .as_ref()
                             .and_then(|c| c.window(id))
                             .map(|w| w.geometry.in_title_bar(self.cursor.0, self.cursor.1))
                             .unwrap_or(false);
-                        let (ox, oy) = self.compositor.as_ref()
+                        let (ox, oy) = self
+                            .compositor
+                            .as_ref()
                             .and_then(|c| c.window(id))
                             .map(|w| (self.cursor.0 - w.geometry.x, self.cursor.1 - w.geometry.y))
                             .unwrap_or((0.0, 0.0));
@@ -170,7 +232,11 @@ impl ApplicationHandler for App {
                             c.bring_to_front(id);
                         }
                         if in_title {
-                            self.drag = Some(DragState { window_id: id, offset_x: ox, offset_y: oy });
+                            self.drag = Some(DragState {
+                                window_id: id,
+                                offset_x: ox,
+                                offset_y: oy,
+                            });
                         }
                         self.request_redraw();
                     }
@@ -196,18 +262,31 @@ impl ApplicationHandler for App {
                         WheelUnit::Pixels,
                     ),
                 };
-                let target = self.drag.as_ref().map(|d| d.window_id)
-                    .or_else(|| self.compositor.as_ref().and_then(|c| c.hit(self.cursor.0, self.cursor.1)));
+                let target = self.drag.as_ref().map(|d| d.window_id).or_else(|| {
+                    self.compositor
+                        .as_ref()
+                        .and_then(|c| c.hit(self.cursor.0, self.cursor.1))
+                });
                 let (wid, _, _) = self.content_coords(target);
-                self.log_input(InputEvent::PointerWheel { window_id: wid, delta_x: dx, delta_y: dy, unit });
+                self.log_input(InputEvent::PointerWheel {
+                    window_id: wid,
+                    delta_x: dx,
+                    delta_y: dy,
+                    unit,
+                });
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed {
-                    if let winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape) = event.logical_key {
+                    if let winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape) =
+                        event.logical_key
+                    {
                         event_loop.exit();
                     }
                 }
-                let focused = self.compositor.as_ref().and_then(|c| c.windows.last().map(|w| w.id));
+                let focused = self
+                    .compositor
+                    .as_ref()
+                    .and_then(|c| c.windows.last().map(|w| w.id));
                 self.log_input(input::from_key_event(focused, &event));
             }
             WindowEvent::RedrawRequested => {
@@ -223,11 +302,16 @@ impl ApplicationHandler for App {
                             if let Some(w) = c.window(1) {
                                 let g = w.geometry.clone();
                                 let _ = c.upsert_window(1, 160, 120, g, "Demo Window A");
-                                tracing::info!("smoke: window 1 resized to 160x120 via upsert_window");
+                                tracing::info!(
+                                    "smoke: window 1 resized to 160x120 via upsert_window"
+                                );
                             }
                         }
-                        let ids: Vec<(u64, u32, u32, u8)> = c.windows.iter()
-                            .map(|w| (w.id, w.frame_width, w.frame_height, w.seed)).collect();
+                        let ids: Vec<(u64, u32, u32, u8)> = c
+                            .windows
+                            .iter()
+                            .map(|w| (w.id, w.frame_width, w.frame_height, w.seed))
+                            .collect();
                         for (id, fw, fh, seed) in ids {
                             let frame = demo::generate(fw, fh, self.frame_index, seed);
                             if let Err(e) = c.submit_frame(id, &frame) {
@@ -266,7 +350,9 @@ impl ApplicationHandler for App {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .init();
     let args: Vec<String> = std::env::args().collect();
     let headless_frames = args
@@ -274,7 +360,9 @@ fn main() -> anyhow::Result<()> {
         .find(|w| w[0] == "--headless-frames")
         .and_then(|w| w[1].parse::<u64>().ok());
     if !args.iter().any(|a| a == "--demo") && headless_frames.is_none() {
-        tracing::info!("no mode flag: defaulting to --demo (transport/codec are not connected in this track)");
+        tracing::info!(
+            "no mode flag: defaulting to --demo (transport/codec are not connected in this track)"
+        );
     }
     let event_loop = EventLoop::new()?;
     let mut app = App::new(headless_frames);

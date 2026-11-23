@@ -22,7 +22,10 @@ pub struct I420Frame {
 /// subtractions are saturating.
 pub fn generate(width: u32, height: u32, frame_index: u64, seed: u8) -> I420Frame {
     let (w, h) = (width.max(1) as usize, height.max(1) as usize);
-    let (cw, ch) = (chroma_dim(width.max(1)) as usize, chroma_dim(height.max(1)) as usize);
+    let (cw, ch) = (
+        chroma_dim(width.max(1)) as usize,
+        chroma_dim(height.max(1)) as usize,
+    );
     let mut y = vec![0u8; w * h];
     let mut u = vec![128u8; cw * ch];
     let mut v = vec![128u8; cw * ch];
@@ -62,7 +65,13 @@ pub fn generate(width: u32, height: u32, frame_index: u64, seed: u8) -> I420Fram
             }
         }
     }
-    I420Frame { width: width.max(1), height: height.max(1), y, u, v }
+    I420Frame {
+        width: width.max(1),
+        height: height.max(1),
+        y,
+        u,
+        v,
+    }
 }
 
 #[cfg(test)]
