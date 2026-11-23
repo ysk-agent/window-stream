@@ -1,10 +1,21 @@
 //! wgpu compositor: every remote window is a set of I420 textures drawn as a
 //! quad, in list order (back to front). Window moves / restacking are pure
 //! client-local list and geometry changes; no host round-trip.
+//!
+//! The compositor owns the window list and implements
+//! [`crate::sink::FrameSink`], which is the lifecycle seam for the
+//! transport/codec tracks: windows are created, resized and destroyed
+//! through it, and frames are submitted through it.
+//!
+//! Coordinates: all geometry is in *logical* pixels. The surface is
+//! configured in physical pixels; `scale_factor` (from winit) is the only
+//! conversion, applied here at the GPU boundary.
 
-use crate::remote_window::{GpuWindowTextures, RemoteWindow, TITLE_BAR_H};
+use crate::demo::I420Frame;
+use crate::input::WindowId;
+use crate::remote_window::{GpuWindowTextures, RemoteWindow, WindowGeometry, TITLE_BAR_H};
+use crate::sink::{FrameError, FrameSink};
 use anyhow::Result;
-use wgpu::util::DeviceExt;
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]
@@ -14,8 +25,12 @@ struct Vertex {
     uv: [f32; 2],
 }
 
+const VERTEX_SIZE: u64 = std::mem::size_of::<Vertex>() as u64;
+/// Persistent vertex buffer capacity, in quads (2 per window: frame +
+/// title bar). Recreated larger only if a frame ever exceeds it.
+const INITIAL_QUAD_CAPACITY: usize = 256;
+
 fn quad(x0: f32, y0: f32, x1: f32, y1: f32, surf_w: f32, surf_h: f32) -> [Vertex; 6] {
-    // Pixel coords (top-left origin) -> clip space.
     let cx = |px: f32| (px / surf_w) * 2.0 - 1.0;
     let cy = |py: f32| 1.0 - (py / surf_h) * 2.0;
     let v = |px: f32, py: f32, u: f32, v_: f32| Vertex { pos: [cx(px), cy(py)], uv: [u, v_] };
@@ -30,17 +45,26 @@ pub struct Compositor {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
+    /// Logical-to-physical scale (winit `scale_factor`). All geometry in
+    /// this crate is logical; this is applied only when talking to wgpu.
+    pub scale_factor: f64,
     pipeline: wgpu::RenderPipeline,
     solid_pipeline: wgpu::RenderPipeline,
     solid_bind_group: wgpu::BindGroup,
+    #[allow(dead_code)]
     solid_uniform: wgpu::Buffer,
-    pub bind_layout: wgpu::BindGroupLayout,
-    pub sampler: wgpu::Sampler,
+    bind_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    vertex_buffer: wgpu::Buffer,
+    quad_capacity: usize,
+    /// Back to front: last element is topmost.
+    pub windows: Vec<RemoteWindow>,
 }
 
 impl Compositor {
     pub async fn new(window: std::sync::Arc<winit::window::Window>) -> Result<Self> {
-        let size = window.inner_size();
+        let size = window.inner_size(); // physical
+        let scale_factor = window.scale_factor();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -62,14 +86,20 @@ impl Compositor {
             )
             .await?;
         let caps = surface.get_capabilities(&adapter);
-        let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .or_else(|| caps.formats.first().copied())
+            .ok_or_else(|| anyhow::anyhow!("surface reports no formats"))?;
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode: caps.alpha_modes.first().copied().ok_or_else(|| anyhow::anyhow!("surface reports no alpha modes"))?,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -80,6 +110,7 @@ impl Compositor {
             entries: &[
                 tex_entry(0), tex_entry(1), tex_entry(2),
                 wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+                wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -99,7 +130,6 @@ impl Compositor {
         });
         let pipeline = make_pipeline(&device, &pipeline_layout, &shader, format);
 
-        // Solid-colour pipeline for title bars.
         let solid_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("solid-color"),
             size: 16,
@@ -132,43 +162,117 @@ impl Compositor {
         });
         let solid_pipeline = make_pipeline(&device, &solid_pipeline_layout, &solid_shader, format);
 
-        Ok(Self { surface, device, queue, config, pipeline, solid_pipeline, solid_bind_group, solid_uniform, bind_layout, sampler })
+        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("persistent-vertex-buffer"),
+            size: INITIAL_QUAD_CAPACITY as u64 * 6 * VERTEX_SIZE,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Ok(Self {
+            surface, device, queue, config, scale_factor,
+            pipeline, solid_pipeline, solid_bind_group, solid_uniform,
+            bind_layout, sampler,
+            vertex_buffer, quad_capacity: INITIAL_QUAD_CAPACITY,
+            windows: Vec::new(),
+        })
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
-        if width > 0 && height > 0 {
-            self.config.width = width;
-            self.config.height = height;
+    /// `physical_width/height` are the surface (window inner) size in
+    /// physical pixels, as winit reports them.
+    pub fn resize(&mut self, physical_width: u32, physical_height: u32, scale_factor: f64) {
+        self.scale_factor = scale_factor;
+        if physical_width > 0 && physical_height > 0 {
+            self.config.width = physical_width;
+            self.config.height = physical_height;
             self.surface.configure(&self.device, &self.config);
         }
     }
 
-    pub fn ensure_textures(&self, win: &mut RemoteWindow) {
-        if win.textures.is_none() {
-            win.textures = Some(GpuWindowTextures::new(&self.device, &self.bind_layout, &self.sampler, win.frame_width, win.frame_height));
+    fn reconfigure(&self) {
+        self.surface.configure(&self.device, &self.config);
+    }
+
+    fn ensure_textures(&mut self, idx: usize) {
+        if self.windows[idx].textures.is_none() {
+            let (w, h) = (self.windows[idx].frame_width, self.windows[idx].frame_height);
+            let tex = GpuWindowTextures::new(&self.device, &self.queue, &self.bind_layout, &self.sampler, w, h);
+            self.windows[idx].textures = Some(tex);
         }
     }
 
-    pub fn render(&mut self, windows: &[RemoteWindow]) -> Result<(), wgpu::SurfaceError> {
-        let output = self.surface.get_current_texture()?;
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
-        let (sw, sh) = (self.config.width as f32, self.config.height as f32);
-        // Pre-create all vertex buffers before the pass: the pass borrows
-        // them, so they must not be created (or moved) while it is alive.
-        let mut buffers: Vec<wgpu::Buffer> = Vec::new();
-        for win in windows {
-            if win.textures.is_none() { continue; }
-            let g = &win.geometry;
-            let verts = quad(g.x, g.y + TITLE_BAR_H, g.x + g.width, g.y + g.height, sw, sh);
-            buffers.push(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("quad"), contents: bytemuck::cast_slice(&verts), usage: wgpu::BufferUsages::VERTEX,
-            }));
-            let tverts = quad(g.x, g.y, g.x + g.width, g.y + TITLE_BAR_H, sw, sh);
-            buffers.push(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("title-quad"), contents: bytemuck::cast_slice(&tverts), usage: wgpu::BufferUsages::VERTEX,
-            }));
+    pub fn window(&self, id: WindowId) -> Option<&RemoteWindow> {
+        self.windows.iter().find(|w| w.id == id)
+    }
+
+    pub fn bring_to_front(&mut self, id: WindowId) {
+        if let Some(idx) = self.windows.iter().position(|w| w.id == id) {
+            let w = self.windows.remove(idx);
+            self.windows.push(w);
+            tracing::info!(window_id = id, "bring_to_front");
         }
+    }
+
+    /// Topmost window under a logical point, if any.
+    pub fn hit(&self, px: f32, py: f32) -> Option<WindowId> {
+        self.windows.iter().rev().find(|w| w.geometry.contains(px, py)).map(|w| w.id)
+    }
+
+    pub fn set_colorimetry(&mut self, id: WindowId, colorimetry: crate::remote_window::Colorimetry) -> bool {
+        match self.windows.iter_mut().find(|w| w.id == id) {
+            Some(w) => match &mut w.textures {
+                Some(tex) => { tex.set_colorimetry(&self.queue, colorimetry); true }
+                None => false,
+            },
+            None => false,
+        }
+    }
+
+    /// Render the current window list. Surface errors are handled here:
+    /// Lost / Outdated reconfigure, Timeout is skipped silently,
+    /// OutOfMemory is reported.
+    pub fn render(&mut self) -> Result<()> {
+        let output = match self.surface.get_current_texture() {
+            Ok(t) => t,
+            Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => {
+                self.reconfigure();
+                return Ok(());
+            }
+            Err(wgpu::SurfaceError::Timeout) => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Logical surface size for clip-space conversion.
+        let (sw, sh) = (
+            self.config.width as f32 / self.scale_factor as f32,
+            self.config.height as f32 / self.scale_factor as f32,
+        );
+
+        // Build all quads into the persistent vertex buffer (one
+        // write_buffer for the whole frame; no per-window allocation).
+        let quads_needed = self.windows.iter().filter(|w| w.textures.is_some()).count() * 2;
+        if quads_needed > self.quad_capacity {
+            let new_cap = quads_needed.next_power_of_two();
+            self.vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("persistent-vertex-buffer"),
+                size: new_cap as u64 * 6 * VERTEX_SIZE,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.quad_capacity = new_cap;
+        }
+        let mut verts: Vec<Vertex> = Vec::with_capacity(quads_needed * 6);
+        for win in self.windows.iter().filter(|w| w.textures.is_some()) {
+            let g = &win.geometry;
+            verts.extend_from_slice(&quad(g.x, g.y + TITLE_BAR_H, g.x + g.width, g.y + g.height, sw, sh));
+            verts.extend_from_slice(&quad(g.x, g.y, g.x + g.width, g.y + TITLE_BAR_H, sw, sh));
+        }
+        if !verts.is_empty() {
+            self.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&verts));
+        }
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("composite"),
@@ -181,23 +285,70 @@ impl Compositor {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            let mut bi = 0usize;
-            for win in windows {
+            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            let mut quad_index: u32 = 0;
+            for win in self.windows.iter() {
                 let Some(tex) = &win.textures else { continue };
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &tex.bind_group, &[]);
-                pass.set_vertex_buffer(0, buffers[bi].slice(..));
-                pass.draw(0..6, 0..1);
+                pass.draw(quad_index * 6..quad_index * 6 + 6, 0..1);
+                quad_index += 1;
                 pass.set_pipeline(&self.solid_pipeline);
                 pass.set_bind_group(0, &self.solid_bind_group, &[]);
-                pass.set_vertex_buffer(0, buffers[bi + 1].slice(..));
-                pass.draw(0..6, 0..1);
-                bi += 2;
+                pass.draw(quad_index * 6..quad_index * 6 + 6, 0..1);
+                quad_index += 1;
             }
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
         Ok(())
+    }
+}
+
+impl FrameSink for Compositor {
+    fn upsert_window(
+        &mut self,
+        id: WindowId,
+        frame_width: u32,
+        frame_height: u32,
+        geometry: WindowGeometry,
+        title: &str,
+    ) -> Result<(), FrameError> {
+        if frame_width == 0 || frame_height == 0 {
+            return Err(FrameError::InvalidFrame { width: frame_width, height: frame_height, reason: "zero frame size".into() });
+        }
+        if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+            win.geometry = geometry;
+            win.title = title.to_string();
+            win.set_frame_size(frame_width, frame_height); // drops textures on change
+        } else {
+            self.windows.push(RemoteWindow::new(id, title, geometry, frame_width, frame_height));
+        }
+        let idx = self.windows.iter().position(|w| w.id == id).unwrap();
+        self.ensure_textures(idx);
+        Ok(())
+    }
+
+    fn remove_window(&mut self, id: WindowId) -> bool {
+        if let Some(idx) = self.windows.iter().position(|w| w.id == id) {
+            self.windows.remove(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn submit_frame(&mut self, id: WindowId, frame: &I420Frame) -> Result<(), FrameError> {
+        let Some(idx) = self.windows.iter().position(|w| w.id == id) else {
+            return Err(FrameError::UnknownWindow(id));
+        };
+        // Host-side resize: follow the frame, recreating textures. Never panic.
+        if self.windows[idx].frame_width != frame.width || self.windows[idx].frame_height != frame.height {
+            tracing::info!(window_id = id, old = ?(self.windows[idx].frame_width, self.windows[idx].frame_height), new = ?(frame.width, frame.height), "frame size changed; recreating textures");
+            self.windows[idx].set_frame_size(frame.width, frame.height);
+        }
+        self.ensure_textures(idx);
+        self.windows[idx].textures.as_ref().unwrap().upload(&self.queue, frame)
     }
 }
 
@@ -223,7 +374,7 @@ fn make_pipeline(
             module: shader,
             entry_point: "vs_main",
             buffers: &[wgpu::VertexBufferLayout {
-                array_stride: 16,
+                array_stride: VERTEX_SIZE,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
             }],

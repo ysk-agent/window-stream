@@ -37,7 +37,16 @@ pub enum InputEvent {
         window_id: Option<WindowId>,
         delta_x: f32,
         delta_y: f32,
+        /// Line vs pixel deltas mean different things; keep them distinct
+        /// instead of silently mixing units.
+        unit: WheelUnit,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelUnit {
+    Lines,
+    Pixels,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

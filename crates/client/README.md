@@ -56,6 +56,47 @@ manifest exists:
    `src/input.rs` with conversions to the generated `Input` message; that
    module is the only place that knows about `winit` event types.
 
+## Review fixes (second commit)
+
+- **Window/texture lifecycle (blocker)**: the compositor owns the window
+  list and implements the `FrameSink` trait (`src/sink.rs`):
+  `upsert_window` / `remove_window` / `submit_frame`. Frame-size changes
+  (host resizes, or a frame arriving at a new size) recreate textures;
+  `upload` returns `Result` and never panics on a size mismatch. The crate
+  now has a library target (`window_stream_client`) so transport/codec can
+  use the seam without the demo binary. Windows without textures are no
+  longer silently skipped by life-cycle gaps: textures are created in
+  `upsert_window` and recreated by `submit_frame` as needed.
+- **Colour**: the I420 shader takes a per-window uniform (BT.601 / BT.709,
+  limited / full). Default by resolution: HD (>= 720 lines or >= 1280 wide)
+  is BT.709, otherwise BT.601 (`Colorimetry::default_for`,
+  `Compositor::set_colorimetry`).
+- **Chroma size** is `ceil`: `(w + 1) / 2` in texture creation, upload and
+  demo generation alike.
+- **Vertex buffers**: one persistent buffer, rewritten once per frame with
+  `queue.write_buffer`; no per-window allocation in the frame path.
+- **Event loop**: `ControlFlow::WaitUntil(next_frame)` instead of polling;
+  redraws happen when a frame is due or on input.
+- **Surface errors**: `Lost` / `Outdated` reconfigure, `Timeout` is skipped
+  silently, `OutOfMemory` is reported.
+- **Pointer coordinates** are content-relative: title-bar height removed,
+  scaled from display geometry to the remote frame size, clamped.
+- **Logical vs physical**: winit physical values are divided by
+  `scale_factor` once at the boundary; all internal geometry is logical,
+  and the compositor applies the scale only for the surface.
+- **Drag targeting**: while dragging, pointer events stay addressed to the
+  dragged window regardless of what is under the cursor.
+- Minor: demo generation is underflow-safe for tiny sizes, wheel events
+  carry a line/pixel unit distinction, and surface format/alpha selection
+  no longer indexes unchecked.
+
+Verification additions: `cargo test` (9 library tests, including ceil
+chroma, colour defaults, content-coordinate scaling, frame validation);
+headless Xvfb run resizes window 1 to 160x120 via `upsert_window` at
+frame 10 and completes 30 frames with no panic; synthetic X input confirms
+title-bar clicks report content y = 0 and drag moves stay addressed to the
+dragged window.
+
 ## Not in this track / not yet verified
 
 - No WebTransport session, no VP9 decode: demo frames substitute for them.

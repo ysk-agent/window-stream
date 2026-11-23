@@ -2266,6 +2266,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "pollster",
+ "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
  "wgpu",
