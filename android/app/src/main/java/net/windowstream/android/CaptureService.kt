@@ -3,6 +3,7 @@ package net.windowstream.android
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -65,6 +66,13 @@ class CaptureService : Service() {
 
         startForegroundWithNotification()
 
+        // A re-start while a projection is already held must not leak
+        // the old one: release it before acquiring the new projection.
+        if (mediaProjection != null) {
+            Log.i(TAG, "Re-start requested while running; releasing previous MediaProjection first")
+            stopCapture()
+        }
+
         val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         try {
             val projection = manager.getMediaProjection(resultCode, data)
@@ -78,7 +86,13 @@ class CaptureService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        return START_STICKY
+        // NOT_STICKY is deliberate: a MediaProjection cannot be restored
+        // after process death (the consent Intent is single-use and the
+        // user must consent again). A sticky restart would relaunch the
+        // service with a null Intent, never call startForeground(), and
+        // on Android 14+ risk ForegroundServiceDidNotStartInTimeException.
+        // Capture only ever restarts from an explicit new consent.
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
@@ -112,10 +126,19 @@ class CaptureService : Service() {
             ).apply { description = getString(R.string.capture_channel_desc) }
             nm.createNotificationChannel(channel)
         }
+        val contentIntent = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         val notification: Notification = Notification.Builder(this, channelId)
             .setContentTitle(getString(R.string.capture_notification_title))
             .setContentText(getString(R.string.capture_notification_text))
             .setSmallIcon(android.R.drawable.presence_video_online)
+            .setContentIntent(contentIntent)
             .build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)

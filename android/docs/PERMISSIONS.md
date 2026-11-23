@@ -43,11 +43,11 @@ around, not rediscovered.
 ## Notifications
 
 Posting the foreground-service notification on Android 13+ interacts
-with `POST_NOTIFICATIONS` (a runtime permission). The service still
-runs if the permission is denied, but the notification may be
-suppressed by the system UI; the app requests nothing beyond what the
-manifest declares in this diagnostics build and does not block capture
-on the notification permission.
+with `POST_NOTIFICATIONS` (a runtime permission). The app requests
+it at runtime from `MainActivity` before capture starts (API 33+).
+The service still runs if the permission is denied, but the
+notification is then suppressed in the drawer; capture is never
+blocked on the notification permission.
 
 ## What is NOT used
 

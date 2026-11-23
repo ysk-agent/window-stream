@@ -60,20 +60,46 @@ class MainActivity : Activity() {
     }
 
     private fun requestCaptureConsent() {
+        // The foreground-service notification needs POST_NOTIFICATIONS
+        // to appear in the drawer on API 33+; ask before capture starts.
+        // Denial does not block capture (the service still runs), it
+        // only suppresses the notification, so the flow continues either
+        // way and the result is handled in onRequestPermissionsResult.
+        ensureNotificationPermission()
         // createScreenCaptureIntent() shows the system consent dialog.
         // On Android 14+ the user can also choose single-app capture;
         // the result is still a whole-display-equivalent token for our
         // purposes and the choice is the user's, not ours.
-        val intent = if (Build.VERSION.SDK_INT >= 34) {
-            // MediaProjectionManager.createScreenCaptureIntent with
-            // MediaProjectionConfig is available on API 34+; the plain
-            // intent keeps behaviour identical across versions here.
-            projectionManager.createScreenCaptureIntent()
-        } else {
-            projectionManager.createScreenCaptureIntent()
-        }
+        val intent = projectionManager.createScreenCaptureIntent()
         @Suppress("DEPRECATION")
         startActivityForResult(intent, REQUEST_CAPTURE)
+    }
+
+    private fun ensureNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) return
+        requestPermissions(
+            arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+            REQUEST_NOTIFICATIONS,
+        )
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_NOTIFICATIONS) return
+        val granted = grantResults.isNotEmpty() &&
+            grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            // Capture is unaffected; only the notification is suppressed.
+            captureStatusText.text =
+                "Note: notifications denied - the capture notification will not appear in the drawer"
+        }
     }
 
     @Deprecated("Activity result API kept intentionally: no AndroidX dependency in the shell")
@@ -118,5 +144,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_CAPTURE = 1001
+        private const val REQUEST_NOTIFICATIONS = 1002
     }
 }
