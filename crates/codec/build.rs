@@ -20,6 +20,19 @@ fn main() {
         .probe("vpx")
         .expect("libvpx not found via pkg-config: install libvpx-dev (see README)");
 
+    // Log the two versions that decide whether the generated bindings are
+    // trustworthy, so a future toolchain/library skew is visible in the
+    // build log instead of surfacing as cryptic field errors. The
+    // 2026-11 incident this guards against: bindgen 0.71.1 + libclang 22
+    // silently generated opaque cfg structs (see crates/codec/README.md).
+    // `cargo:warning` is used because plain stdout from a build script is
+    // only shown with `cargo build -vv`.
+    println!(
+        "cargo:warning=window-stream-codec: libvpx {} (pkg-config), libclang: {}",
+        lib.version,
+        bindgen::clang_version().full
+    );
+
     let mut builder = bindgen::Builder::default()
         .header("wrapper.h")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
@@ -33,14 +46,16 @@ fn main() {
         .allowlist_var("VP8_.*")
         .allowlist_var("VP9_.*")
         .derive_debug(true)
-        // No layout tests: bindgen's layout assertions compare the
-        // generated struct layout against the *build-time* headers, but
-        // several libvpx structs contain unions/bitfields whose layout
-        // bindgen cannot reproduce exactly across versions, so the tests
-        // would be brittle without catching a real mismatch — the FFI
-        // safety here comes from generating bindings from the same
-        // headers as the linked library (see the module docs above).
-        .layout_tests(false);
+        // Layout tests ON (changed 2026-11-23): bindgen emits compile-time
+        // size/offset assertions into the bindings, so a generation or
+        // layout regression fails the build inside the bindings with the
+        // expected size named, instead of compiling into a wrong-but-
+        // usable FFI. This was previously disabled over brittleness
+        // concerns; enabling it was verified against libvpx 1.14 and 1.16
+        // headers (the layouts this crate uses are identical in both).
+        // The explicit cfg size assertions in src/sys.rs are the second,
+        // human-readable tripwire. See crates/codec/README.md.
+        .layout_tests(true);
     for path in &lib.include_paths {
         builder = builder.clang_arg(format!("-I{}", path.display()));
     }

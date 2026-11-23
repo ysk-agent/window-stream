@@ -9,6 +9,28 @@
 
 include!(concat!(env!("OUT_DIR"), "/vpx_bindings.rs"));
 
+// Tripwire against silent binding-generation regressions (defence in
+// depth, added 2026-11-23 alongside bindgen's own layout tests in
+// build.rs). The config struct layouts are identical in libvpx 1.14 and
+// 1.16 — measured with a C program against both header sets:
+// vpx_codec_enc_cfg is 504 bytes, vpx_codec_dec_cfg is 12 bytes on
+// 64-bit targets. If bindgen ever again emits these as opaque types
+// (1 byte, as bindgen 0.71.1 did under libclang 22), or a future libvpx
+// really does change the layout, compilation stops here with the
+// expected size named. If a future libvpx changes the layout
+// intentionally, verify the new size against the C headers and update
+// these constants — do not just delete them.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(
+    std::mem::size_of::<vpx_codec_enc_cfg>() == 504,
+    "vpx_codec_enc_cfg size mismatch: expected 504 bytes (libvpx 1.14/1.16)"
+);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(
+    std::mem::size_of::<vpx_codec_dec_cfg>() == 12,
+    "vpx_codec_dec_cfg size mismatch: expected 12 bytes (libvpx 1.14/1.16)"
+);
+
 // The `vp8_enc_control_id` enum is only referenced from C macros
 // (VPX_CTRL_USE_TYPE), so bindgen does not emit it. The values below are
 // taken verbatim from the installed <vpx/vp8cx.h> (libvpx 1.14) enum, in
