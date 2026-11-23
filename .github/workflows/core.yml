@@ -15,8 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install protoc (for prost-build)
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc (for prost-build) and libvpx headers (for codec)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libvpx-dev
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy
