@@ -85,11 +85,25 @@ pub struct Vp9Encoder {
     /// `last_encoded_seq + 1` as its pts so it can never collide with a
     /// real frame's pts (frame seqs need not start at 0 or be dense).
     last_encoded_seq: u64,
-    /// Seq of the last keyframe forced by ack-stall escalation. The
-    /// escalation re-arms only after another full threshold has passed,
-    /// so a permanently stalled ack yields a periodic keyframe (one per
+    /// Index (in encoded frames, see `frames_encoded`) of the last
+    /// keyframe forced by ack-stall escalation. The escalation
+    /// re-arms only after another full threshold has passed, so a
+    /// permanently stalled ack yields a periodic keyframe (one per
     /// threshold interval) instead of turning every frame into one.
-    last_stall_keyframe_seq: Option<u64>,
+    last_stall_keyframe_index: Option<u64>,
+    /// Map from a frame's seq to its index in encoded frames, for
+    /// the frames since the last ack. Frame seqs are assigned by the
+    /// frame source and need not be dense (a capture source numbers
+    /// by its own capture sequence and drops stale frames, leaving
+    /// gaps of arbitrary size), so the ack-stall threshold — which
+    /// is denominated in *frames* — must be computed on indices,
+    /// never on raw seq differences. Entries older than the last
+    /// acked frame are pruned in `set_reference_constraint`.
+    seq_index: std::collections::HashMap<u64, u64>,
+    /// Index of the last acked frame (the frame whose seq was most
+    /// recently passed to `set_reference_constraint`), if that seq
+    /// is still in `seq_index`.
+    last_acked_index: Option<u64>,
     keyframes_encoded: u64,
     invalidations: u64,
     /// Non-fatal libvpx control calls that failed during setup, kept for
@@ -170,7 +184,9 @@ impl Vp9Encoder {
                 last_acked_seq: None,
                 frames_encoded: 0,
                 last_encoded_seq: 0,
-                last_stall_keyframe_seq: None,
+                last_stall_keyframe_index: None,
+                seq_index: std::collections::HashMap::new(),
+                last_acked_index: None,
                 keyframes_encoded: 0,
                 invalidations: 0,
                 control_warnings: Vec::new(),
@@ -426,20 +442,24 @@ impl VideoEncoder for Vp9Encoder {
         // permanently stalled ack yields one keyframe per interval
         // instead of turning every frame into a keyframe.
         if self.config.reference_mode == ReferenceMode::AckGated {
-            if let Some(acked) = self.last_acked_seq {
+            if let Some(acked_index) = self.last_acked_index {
                 let threshold = self.config.ack_stall_threshold_frames as u64;
-                if threshold > 0 && frame.seq().saturating_sub(acked) > threshold {
-                    let rearmed = match self.last_stall_keyframe_seq {
+                // `frames_encoded` is the index of the frame being
+                // encoded (it is incremented after the encode below).
+                let cur_index = self.frames_encoded;
+                if threshold > 0 && cur_index.saturating_sub(acked_index) > threshold {
+                    let rearmed = match self.last_stall_keyframe_index {
                         None => true,
-                        Some(kf_seq) => frame.seq().saturating_sub(kf_seq) > threshold,
+                        Some(kf_index) => cur_index.saturating_sub(kf_index) > threshold,
                     };
                     if rearmed {
                         self.force_next_keyframe = true;
-                        self.last_stall_keyframe_seq = Some(frame.seq());
+                        self.last_stall_keyframe_index = Some(cur_index);
                     }
                 }
             }
         }
+        self.seq_index.insert(frame.seq(), self.frames_encoded);
         let flags = self.encode_flags();
         unsafe {
             check(
@@ -483,6 +503,13 @@ impl VideoEncoder for Vp9Encoder {
 
     fn set_reference_constraint(&mut self, acked_seq: Option<u64>) {
         self.last_acked_seq = acked_seq;
+        self.last_acked_index = match acked_seq {
+            Some(seq) => self.seq_index.get(&seq).copied().or(self.last_acked_index),
+            None => None,
+        };
+        if let Some(acked_index) = self.last_acked_index {
+            self.seq_index.retain(|_, &mut idx| idx >= acked_index);
+        }
     }
 
     fn invalidate_reference(&mut self) {
