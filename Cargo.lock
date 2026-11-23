@@ -3503,6 +3503,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "window-stream-perf"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "window-stream-codec",
+ "window-stream-proto",
+]
+
+[[package]]
 name = "window-stream-platform"
 version = "0.1.0"
 dependencies = [

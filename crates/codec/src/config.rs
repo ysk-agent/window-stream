@@ -55,6 +55,11 @@ pub struct EncoderConfig {
     pub cpu_used: i32,
     /// Threads handed to libvpx (`g_threads`). 0 lets the default apply;
     /// VP9 row-based multithreading is enabled separately when threads > 1.
+    /// The realtime default is 2 (perf cycle 1, 2026-11-23): row-MT cut
+    /// mean encode time by roughly 20–35% at both 720p and 1080p on the
+    /// (1.5 vCPU-capped) development VM, at unchanged bitrate and PSNR,
+    /// at the cost of ~10–15% more total host CPU time. Hosts running
+    /// many windows at once may want to lower this per encoder.
     pub threads: u32,
     /// Automatic keyframe interval in frames. 0 disables periodic keyframes
     /// (keyframes only on start / explicit request), which is the protocol's
@@ -97,7 +102,7 @@ impl EncoderConfig {
             target_bitrate_kbps,
             fps: 30,
             cpu_used: 6,
-            threads: 0,
+            threads: 2,
             keyframe_interval: 0,
             reference_mode: ReferenceMode::default(),
             error_resilient: true,
@@ -130,8 +135,19 @@ impl EncoderConfig {
 }
 
 /// VP9 decoder configuration. Deliberately minimal in v1.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DecoderConfig {
     /// Threads handed to libvpx (`g_threads`). 0 = libvpx default.
+    /// The default is 2 (perf cycle 1, 2026-11-23): it cut mean decode
+    /// time by roughly 30–45% at 720p/1080p on the development VM with
+    /// no increase in total process CPU time (shorter wall time at a
+    /// slightly higher core utilisation — race-to-sleep on the client,
+    /// which is the side whose power budget the design protects).
     pub threads: u32,
+}
+
+impl Default for DecoderConfig {
+    fn default() -> Self {
+        Self { threads: 2 }
+    }
 }
