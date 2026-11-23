@@ -96,6 +96,11 @@ impl VideoDecoder for Vp9Decoder {
                     break;
                 }
                 let img = &*img;
+                if img.d_w == 0 || img.d_h == 0 {
+                    return Err(CodecError::Decode(
+                        "decoded frame has a zero dimension".into(),
+                    ));
+                }
                 if img.fmt != sys::vpx_img_fmt_VPX_IMG_FMT_I420 {
                     return Err(CodecError::Decode(format!(
                         "expected I420 output, got fmt {}",

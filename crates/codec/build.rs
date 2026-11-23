@@ -33,6 +33,13 @@ fn main() {
         .allowlist_var("VP8_.*")
         .allowlist_var("VP9_.*")
         .derive_debug(true)
+        // No layout tests: bindgen's layout assertions compare the
+        // generated struct layout against the *build-time* headers, but
+        // several libvpx structs contain unions/bitfields whose layout
+        // bindgen cannot reproduce exactly across versions, so the tests
+        // would be brittle without catching a real mismatch — the FFI
+        // safety here comes from generating bindings from the same
+        // headers as the linked library (see the module docs above).
         .layout_tests(false);
     for path in &lib.include_paths {
         builder = builder.clang_arg(format!("-I{}", path.display()));

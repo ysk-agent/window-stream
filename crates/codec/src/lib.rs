@@ -26,7 +26,7 @@ pub mod ivf;
 pub mod pattern;
 pub mod sys;
 
-pub use config::{DecoderConfig, EncoderConfig, ReferenceMode};
+pub use config::{DecoderConfig, EncoderConfig, ReferenceMode, DEFAULT_ACK_STALL_THRESHOLD_FRAMES};
 pub use decoder::Vp9Decoder;
 pub use encoder::Vp9Encoder;
 pub use error::{CodecError, Result};
@@ -52,13 +52,25 @@ pub trait VideoEncoder {
 
     /// Record the client's acknowledgement: `acked_seq` is the sequence
     /// number of the last frame the client successfully decoded (the
-    /// protocol's `FrameAck`). See the implementation's documentation for
-    /// exactly how this constrains reference use — libvpx cannot express
-    /// "reference only frames <= ack" directly.
+    /// protocol's `FrameAck`). In `AckGated` mode this drives a safety
+    /// net inside `encode()`: if acks stall more than
+    /// `EncoderConfig::ack_stall_threshold_frames` behind the frame being
+    /// encoded, that frame is forced to be a keyframe. That escalation
+    /// is **not** a substitute for prompt invalidation — the host must
+    /// still call [`VideoEncoder::invalidate_reference`] as soon as it
+    /// *knows* a frame was lost (e.g. a gap in `FrameAck` or a transport
+    /// loss report), rather than waiting for the stall threshold.
+    /// See the implementation's documentation for exactly how this
+    /// constrains reference use — libvpx cannot express "reference only
+    /// frames <= ack" directly, so a delta always chains on the `last`
+    /// reference and may reference the (keyframe-held) golden / alt-ref.
     fn set_reference_constraint(&mut self, acked_seq: Option<u64>);
 
     /// The stream's reference chain may be broken (a frame was lost):
     /// invalidate all references. The next frame is encoded as a keyframe.
+    /// The host must call this promptly on known loss; the ack-stall
+    /// escalation in `encode()` only covers the case where the loss is
+    /// *not* noticed and acks simply stop advancing.
     fn invalidate_reference(&mut self);
 }
 

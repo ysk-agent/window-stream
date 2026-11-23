@@ -131,6 +131,12 @@ impl<R: Read> IvfReader<R> {
                 &h[0..4]
             )));
         }
+        if &h[8..12] != FOURCC_VP9 {
+            return Err(CodecError::InvalidIvf(format!(
+                "unsupported FourCC {:?}, expected VP90",
+                &h[8..12]
+            )));
+        }
         let header_len = u16::from_le_bytes(h[6..8].try_into().unwrap()) as usize;
         if header_len > HEADER_LEN {
             // Skip any header extension bytes.
@@ -183,30 +189,141 @@ impl<R: Read> IvfReader<R> {
 /// produced by this crate's realtime configuration, so the first frame's
 /// header decides.
 pub fn vp9_is_keyframe(data: &[u8]) -> bool {
-    if data.len() < 2 {
-        return false;
+    vp9_header_info(data)
+        .map(|h| h.is_keyframe)
+        .unwrap_or(false)
+}
+
+/// MSB-first bit reader over a VP9 uncompressed header.
+struct Vp9BitReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Vp9BitReader<'a> {
+    fn bit(&mut self) -> u32 {
+        let idx = self.pos / 8;
+        let b = if idx >= self.data.len() {
+            0
+        } else {
+            (u32::from(self.data[idx]) >> (7 - (self.pos % 8))) & 1
+        };
+        self.pos += 1;
+        b
     }
-    // VP9's bit reader consumes bits MSB-first within each byte.
-    let bit = |pos: usize| -> u32 {
-        let idx = pos / 8;
-        if idx >= data.len() {
-            return 0;
+
+    fn literal(&mut self, n: usize) -> u32 {
+        let mut v = 0u32;
+        for _ in 0..n {
+            v = (v << 1) | self.bit();
         }
-        (u32::from(data[idx]) >> (7 - (pos % 8))) & 1
-    };
-    // frame_marker: 2 bits, value 0b10.
-    if bit(0) != 1 || bit(1) != 0 {
-        return false;
+        v
     }
-    // profile_low (1 bit), profile_high (1 bit), [reserved (1 bit) if
-    // profile == 3], show_existing (1 bit), frame_type (1 bit).
-    let profile = bit(2) | (bit(3) << 1);
-    let mut pos = 4usize;
+}
+
+/// The part of a VP9 uncompressed header that the tests need.
+///
+/// VP9 spec, uncompressed header, bit order (MSB-first within each byte),
+/// cross-checked against libvpx 1.14's decoder
+/// (`vp9/decoder/vp9_decodeframe.c`, `read_uncompressed_header`):
+/// frame_marker (2, must be `0b10`), profile (2; +1 reserved bit if
+/// profile == 3), show_existing_frame (1), frame_type (1), show_frame (1),
+/// error_resilient_mode (1). Keyframes then carry sync code / colour /
+/// size; inter frames with `show_frame == 0` carry intra_only (1) —
+/// with `show_frame == 1` (always, in this crate's realtime streams)
+/// intra_only is implicitly 0 and occupies no bit — then, only when
+/// error_resilient_mode == 0, reset_frame_context (2), then (unless
+/// intra-only) refresh_frame_flags (8) and, per reference, ref_frame_idx
+/// (3) followed by its 1-bit sign bias, in LAST / GOLDEN / ALTREF order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Vp9HeaderInfo {
+    /// True for keyframes (frame_type == 0).
+    pub is_keyframe: bool,
+    /// True for show-existing-frame packets (no new frame coded).
+    pub show_existing_frame: bool,
+    /// True for intra-only inter frames (refreshes all references).
+    pub intra_only: bool,
+    /// `refresh_frame_flags` for inter frames: bit `i` set means
+    /// reference-map slot `i` is refreshed with this frame (LSB-first:
+    /// the decoder walks the flags from the least significant bit).
+    /// `None` for keyframes, show-existing and intra-only frames.
+    pub refresh_frame_flags: Option<u8>,
+    /// Reference-map slots of the LAST / GOLDEN / ALTREF references, for
+    /// inter frames. `None` for keyframes, show-existing and intra-only
+    /// frames.
+    pub ref_frame_idx: Option<[u8; 3]>,
+}
+
+/// Parse the VP9 uncompressed header far enough to recover the keyframe
+/// flag, the refresh flags and the reference indices. Returns `None` if
+/// the data is too short or the frame marker is not `0b10`.
+pub fn vp9_header_info(data: &[u8]) -> Option<Vp9HeaderInfo> {
+    if data.len() < 2 {
+        return None;
+    }
+    let mut r = Vp9BitReader { data, pos: 0 };
+    if r.literal(2) != 0b10 {
+        return None;
+    }
+    let profile = r.bit() | (r.bit() << 1);
     if profile == 3 {
-        pos += 1; // reserved_zero
+        r.bit(); // reserved_zero
     }
-    if bit(pos) == 1 {
-        return false; // show_existing_frame: no new frame coded
+    let show_existing_frame = r.bit() == 1;
+    if show_existing_frame {
+        return Some(Vp9HeaderInfo {
+            is_keyframe: false,
+            show_existing_frame: true,
+            intra_only: false,
+            refresh_frame_flags: None,
+            ref_frame_idx: None,
+        });
     }
-    bit(pos + 1) == 0 // frame_type: 0 = key frame
+    let frame_type = r.bit();
+    let show_frame = r.bit();
+    let error_resilient = r.bit();
+    if frame_type == 0 {
+        return Some(Vp9HeaderInfo {
+            is_keyframe: true,
+            show_existing_frame: false,
+            intra_only: false,
+            refresh_frame_flags: None,
+            ref_frame_idx: None,
+        });
+    }
+    // intra_only is only coded when show_frame == 0 (libvpx:
+    // `cm->intra_only = cm->show_frame ? 0 : vpx_rb_read_bit(rb)`).
+    let intra_only = if show_frame == 0 { r.bit() == 1 } else { false };
+    if error_resilient == 0 {
+        r.literal(2); // reset_frame_context
+    }
+    if intra_only {
+        return Some(Vp9HeaderInfo {
+            is_keyframe: false,
+            show_existing_frame: false,
+            intra_only: true,
+            refresh_frame_flags: None,
+            ref_frame_idx: None,
+        });
+    }
+    let refresh_frame_flags = r.literal(8) as u8;
+    let mut ref_frame_idx = [0u8; 3];
+    for slot in ref_frame_idx.iter_mut() {
+        *slot = r.literal(3) as u8;
+        let _sign_bias = r.bit(); // ref_frame_sign_bias, one per reference
+    }
+    Some(Vp9HeaderInfo {
+        is_keyframe: false,
+        show_existing_frame: false,
+        intra_only: false,
+        refresh_frame_flags: Some(refresh_frame_flags),
+        ref_frame_idx: Some(ref_frame_idx),
+    })
+}
+
+/// `refresh_frame_flags` of a VP9 inter frame, or `None` for keyframes /
+/// show-existing / intra-only frames / unparseable data. Convenience
+/// wrapper over [`vp9_header_info`].
+pub fn vp9_refresh_frame_flags(data: &[u8]) -> Option<u8> {
+    vp9_header_info(data).and_then(|h| h.refresh_frame_flags)
 }

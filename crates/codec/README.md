@@ -85,8 +85,12 @@ pieces, stated precisely:
    therefore breaks the chain until the next keyframe, as in any VP9
    stream.
 3. Recovery is escalation: `set_reference_constraint(ack)` records the
-   client's position, and `invalidate_reference()` forces the next
-   frame to be a keyframe. A lost keyframe is replaced by a *new*
+   client's position and, in AckGated mode, `encode()` forces a keyframe
+   once acks lag more than `ack_stall_threshold_frames` (default 30)
+   behind the frame being encoded; `invalidate_reference()` forces the
+   next frame to be a keyframe immediately and must be called promptly
+   on known loss — the stall escalation is only a safety net for
+   unnoticed loss. A lost keyframe is replaced by a *new*
    keyframe, never retransmitted — the protocol's loss policy.
 
 `ReferenceMode::Normal` drops rule 1 (ordinary VP9 behaviour, for
@@ -110,6 +114,11 @@ values bindgen cannot see (the enum is referenced only from macros) are
 pinned as constants in `src/sys.rs` with their source noted.
 
 ## Build prerequisites (Linux)
+
+Toolchain requirements: **Rust >= 1.77** (the crate's `rust-version`;
+bindgen 0.71's MSRV — older toolchains fail because `rustc-hash` 2.x
+requires >= 1.77), **libvpx >= 1.14** (headers + library), clang /
+libclang for bindgen.
 
 ```sh
 # libvpx headers + library, pkg-config, a C toolchain, libclang for bindgen
@@ -141,9 +150,20 @@ decode it, and measure quality. Measured on the development VM:
 **mean luma PSNR 48.39 dB** (asserted floor: 30 dB). The tests also
 assert that the first frame is a keyframe, that AckGated mode emits no
 periodic keyframes, that `invalidate_reference()` forces a keyframe
-which a fresh decoder can start from, that KeyframesOnly packets each
-decode standalone, and that an IVF dump parses back byte-identically
-and decodes end-to-end.
+which the *same* (stalled) decoder resynchronises on — keyframe plus
+the following delta both decode, after a gap of dropped frames — that
+KeyframesOnly packets each decode standalone, and that an IVF dump
+parses back byte-identically and decodes end-to-end. Ack-stall
+escalation is covered: with acks stuck, a keyframe is forced once the
+lag passes 30 frames (and not before); a bitrate change mid-stream
+keeps the periodic keyframe interval; `luma_psnr` on mismatched
+dimensions returns NaN instead of panicking. A bitstream-level test
+parses the VP9 uncompressed header (`ivf::vp9_header_info`,
+cross-checked against libvpx 1.14's decoder) and asserts that in
+AckGated mode no inter frame refreshes the golden / alt-ref reference
+slots — only the `last` slot is refreshed — with a Normal-mode control
+that does refresh golden, so the parser cannot be returning false
+negatives.
 
 Bench (60 frames per size, `cargo run --release --example bench`),
 development VM — a shared, CPU-throttled sandbox (1.5 vCPU cap), so

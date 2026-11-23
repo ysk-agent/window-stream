@@ -16,10 +16,15 @@ use crate::error::{CodecError, Result};
 ///   lossless link; a lost delta corrupts everything until the next
 ///   keyframe.
 /// * [`ReferenceMode::AckGated`] — inter prediction stays on, but the
-///   long-lived references (golden / alt-ref) are only *updated* from, and
-///   only *used* for, frames the client has acknowledged; on any loss the
-///   caller escalates to a forced keyframe. This is the mode the protocol
-///   is designed around.
+///   long-lived references (golden / alt-ref) are never *updated* by an
+///   inter frame — only keyframes refresh them, so an unacknowledged
+///   delta cannot contaminate them. Inter frames may still *reference*
+///   golden / alt-ref (they hold the last keyframe), and every delta
+///   chains on the `last` reference, which advances frame to frame.
+///   So this mode does **not** make a delta depend only on acknowledged
+///   frames; on any loss the caller must escalate to a forced keyframe
+///   before the chain heals. This is the mode the protocol is designed
+///   around.
 /// * [`ReferenceMode::KeyframesOnly`] — every frame is a keyframe. No inter
 ///   dependency at all, so loss can never propagate; costs several times
 ///   the bitrate. A safe fallback and a useful measurement baseline.
@@ -65,7 +70,23 @@ pub struct EncoderConfig {
     /// 0 (default) disables dropping — window-stream drops stale frames at
     /// its own queue (depth 1), not inside the encoder.
     pub dropframe_thresh: u32,
+    /// Ack-stall escalation threshold, in frames (AckGated mode only).
+    /// If the newest encoded frame's seq is more than this many frames
+    /// past the last acknowledged seq, `encode()` forces a keyframe:
+    /// acks that stall that long mean the client's reference chain is
+    /// presumed broken. The escalation then re-arms only after another
+    /// full threshold interval, so a permanently stalled ack yields one
+    /// keyframe per interval, not one per frame. 0 disables the
+    /// escalation. Default: 30 (see
+    /// [`DEFAULT_ACK_STALL_THRESHOLD_FRAMES`]).
+    pub ack_stall_threshold_frames: u32,
 }
+
+/// Default [`EncoderConfig::ack_stall_threshold_frames`]: force a
+/// keyframe once acks lag the encoder by more than 30 frames (~1 s at
+/// 30 fps). A safety net for ack stall, not a substitute for calling
+/// `invalidate_reference()` promptly when a loss is known.
+pub const DEFAULT_ACK_STALL_THRESHOLD_FRAMES: u32 = 30;
 
 impl EncoderConfig {
     /// Realtime defaults for `width`x`height` at `target_bitrate_kbps`.
@@ -81,6 +102,7 @@ impl EncoderConfig {
             reference_mode: ReferenceMode::default(),
             error_resilient: true,
             dropframe_thresh: 0,
+            ack_stall_threshold_frames: DEFAULT_ACK_STALL_THRESHOLD_FRAMES,
         }
     }
 

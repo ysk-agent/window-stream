@@ -197,13 +197,13 @@ fn plane_sizes(width: u32, height: u32) -> (usize, usize, usize) {
 }
 
 /// Mean luma PSNR in dB between two same-sized frames.
-/// Returns `f64::INFINITY` for identical luma planes.
+/// Returns `f64::INFINITY` for identical luma planes, and `f64::NAN`
+/// if the frames have different dimensions (no panic: this is a public
+/// API and a size mismatch is a caller error, not a logic error).
 pub fn luma_psnr(a: &I420Frame, b: &I420Frame) -> f64 {
-    assert_eq!(
-        (a.width, a.height),
-        (b.width, b.height),
-        "PSNR needs equal dimensions"
-    );
+    if (a.width, a.height) != (b.width, b.height) {
+        return f64::NAN;
+    }
     let mut sse: u64 = 0;
     for (x, y) in a.y.iter().zip(b.y.iter()) {
         let d = i64::from(*x) - i64::from(*y);

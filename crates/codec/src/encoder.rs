@@ -64,8 +64,11 @@ use crate::VideoEncoder;
 /// 3. Recovery is by escalation, not repair: when acknowledgements stall
 ///    or the caller learns a frame was lost,
 ///    [`VideoEncoder::invalidate_reference`] forces the next frame to be
-///    a keyframe. A lost keyframe is replaced by a *new* keyframe, never
-///    retransmitted — matching the protocol's loss policy.
+///    a keyframe, and `encode()` itself forces a keyframe once acks lag
+///    more than `EncoderConfig::ack_stall_threshold_frames` behind the
+///    frame being encoded (AckGated only). A lost keyframe is replaced
+///    by a *new* keyframe, never retransmitted — matching the protocol's
+///    loss policy.
 ///
 /// In other words: AckGated bounds how much state an unacknowledged frame
 /// can contaminate (long-term references stay keyframe-clean), and makes
@@ -78,12 +81,41 @@ pub struct Vp9Encoder {
     force_next_keyframe: bool,
     last_acked_seq: Option<u64>,
     frames_encoded: u64,
+    /// Seq of the most recently encoded frame; `flush()` uses
+    /// `last_encoded_seq + 1` as its pts so it can never collide with a
+    /// real frame's pts (frame seqs need not start at 0 or be dense).
+    last_encoded_seq: u64,
+    /// Seq of the last keyframe forced by ack-stall escalation. The
+    /// escalation re-arms only after another full threshold has passed,
+    /// so a permanently stalled ack yields a periodic keyframe (one per
+    /// threshold interval) instead of turning every frame into one.
+    last_stall_keyframe_seq: Option<u64>,
     keyframes_encoded: u64,
     invalidations: u64,
     /// Non-fatal libvpx control calls that failed during setup, kept for
     /// diagnostics (e.g. row-MT rejected at a tiny resolution).
     pub control_warnings: Vec<String>,
     _not_sync: PhantomData<*mut ()>,
+}
+
+/// Apply the keyframe fields of an [`EncoderConfig`] to a raw libvpx
+/// config. Shared by `new()` and `set_bitrate_kbps()` so a runtime
+/// bitrate change cannot silently drop the keyframe schedule.
+fn apply_keyframe_settings(raw: &mut sys::vpx_codec_enc_cfg_t, config: &EncoderConfig) {
+    if config.keyframe_interval > 0 {
+        raw.kf_mode = sys::vpx_kf_mode_VPX_KF_AUTO;
+        raw.kf_min_dist = 0;
+        raw.kf_max_dist = config.keyframe_interval;
+    } else {
+        raw.kf_mode = sys::vpx_kf_mode_VPX_KF_DISABLED;
+        raw.kf_min_dist = 0;
+        raw.kf_max_dist = 0;
+    }
+    if config.reference_mode == ReferenceMode::KeyframesOnly {
+        raw.kf_mode = sys::vpx_kf_mode_VPX_KF_AUTO;
+        raw.kf_min_dist = 0;
+        raw.kf_max_dist = 1;
+    }
 }
 
 impl Vp9Encoder {
@@ -116,20 +148,7 @@ impl Vp9Encoder {
             cfg.rc_end_usage = sys::vpx_rc_mode_VPX_CBR;
             cfg.rc_target_bitrate = config.target_bitrate_kbps;
             cfg.rc_dropframe_thresh = config.dropframe_thresh;
-            if config.keyframe_interval > 0 {
-                cfg.kf_mode = sys::vpx_kf_mode_VPX_KF_AUTO;
-                cfg.kf_min_dist = 0;
-                cfg.kf_max_dist = config.keyframe_interval;
-            } else {
-                cfg.kf_mode = sys::vpx_kf_mode_VPX_KF_DISABLED;
-                cfg.kf_min_dist = 0;
-                cfg.kf_max_dist = 0;
-            }
-            if config.reference_mode == ReferenceMode::KeyframesOnly {
-                cfg.kf_mode = sys::vpx_kf_mode_VPX_KF_AUTO;
-                cfg.kf_min_dist = 0;
-                cfg.kf_max_dist = 1;
-            }
+            apply_keyframe_settings(&mut cfg, &config);
 
             let mut ctx = Box::new(std::mem::zeroed::<sys::vpx_codec_ctx_t>());
             check(
@@ -150,6 +169,8 @@ impl Vp9Encoder {
                 force_next_keyframe: false,
                 last_acked_seq: None,
                 frames_encoded: 0,
+                last_encoded_seq: 0,
+                last_stall_keyframe_seq: None,
                 keyframes_encoded: 0,
                 invalidations: 0,
                 control_warnings: Vec::new(),
@@ -227,6 +248,7 @@ impl Vp9Encoder {
             raw.g_timebase.den = new_cfg.fps as c_int;
             raw.g_threads = new_cfg.threads;
             raw.g_lag_in_frames = 0;
+            raw.g_pass = sys::vpx_enc_pass_VPX_RC_ONE_PASS;
             raw.g_error_resilient = if new_cfg.error_resilient {
                 sys::VPX_ERROR_RESILIENT_DEFAULT
             } else {
@@ -235,6 +257,11 @@ impl Vp9Encoder {
             raw.rc_end_usage = sys::vpx_rc_mode_VPX_CBR;
             raw.rc_target_bitrate = kbps;
             raw.rc_dropframe_thresh = new_cfg.dropframe_thresh;
+            // Keyframe settings are part of the saved config, not of the
+            // library defaults: re-apply them exactly as `new()` does, or
+            // a bitrate change would silently drop periodic keyframes
+            // (and KeyframesOnly mode).
+            apply_keyframe_settings(&mut raw, &new_cfg);
             check(
                 sys::vpx_codec_enc_config_set(&mut *self.ctx, &raw),
                 Some(&self.ctx),
@@ -373,6 +400,32 @@ impl VideoEncoder for Vp9Encoder {
             )));
         }
         self.copy_frame_into_img(frame);
+        // Ack-stall escalation (AckGated only): if the client's acks have
+        // stalled more than `ack_stall_threshold_frames` behind the frame
+        // being encoded, the client's reference chain is presumed broken
+        // and this frame is forced to be a keyframe. This is a safety
+        // net for unnoticed loss; known loss must still be escalated
+        // promptly via `invalidate_reference()` (see the trait docs).
+        // `last_acked_seq == None` (no ack yet) never escalates: the
+        // first frames are keyframed by libvpx anyway. The escalation
+        // re-arms only after another full threshold interval, so a
+        // permanently stalled ack yields one keyframe per interval
+        // instead of turning every frame into a keyframe.
+        if self.config.reference_mode == ReferenceMode::AckGated {
+            if let Some(acked) = self.last_acked_seq {
+                let threshold = self.config.ack_stall_threshold_frames as u64;
+                if threshold > 0 && frame.seq().saturating_sub(acked) > threshold {
+                    let rearmed = match self.last_stall_keyframe_seq {
+                        None => true,
+                        Some(kf_seq) => frame.seq().saturating_sub(kf_seq) > threshold,
+                    };
+                    if rearmed {
+                        self.force_next_keyframe = true;
+                        self.last_stall_keyframe_seq = Some(frame.seq());
+                    }
+                }
+            }
+        }
         let flags = self.encode_flags();
         unsafe {
             check(
@@ -389,6 +442,7 @@ impl VideoEncoder for Vp9Encoder {
         }
         self.force_next_keyframe = false;
         self.frames_encoded += 1;
+        self.last_encoded_seq = frame.seq();
         self.drain(frame.seq())
     }
 
@@ -398,7 +452,7 @@ impl VideoEncoder for Vp9Encoder {
                 sys::vpx_codec_encode(
                     &mut *self.ctx,
                     std::ptr::null(),
-                    self.frames_encoded as sys::vpx_codec_pts_t,
+                    self.last_encoded_seq.saturating_add(1) as sys::vpx_codec_pts_t,
                     1,
                     0,
                     sys::VPX_DL_REALTIME as c_ulong,
@@ -406,7 +460,7 @@ impl VideoEncoder for Vp9Encoder {
                 Some(&self.ctx),
             )?;
         }
-        self.drain(self.frames_encoded)
+        self.drain(self.last_encoded_seq.saturating_add(1))
     }
 
     fn force_keyframe(&mut self) {
