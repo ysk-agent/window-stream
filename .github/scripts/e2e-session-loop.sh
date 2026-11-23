@@ -46,7 +46,7 @@ export BUS_DIR="${RUNNER_TEMP}/session-bus"
 export SESSION_OUT="${GITHUB_WORKSPACE}/session-out"
 mkdir -p "$SESSION_OUT"
 
-echo "session: run=${GITHUB_RUN_ID} bus=${BUS_BRANCH} idle=${IDLE_MINUTES}m poll=${POLL_SECS}s"
+echo "session: run=${GITHUB_RUN_ID} bus=${BUS_BRANCH} idle=${IDLE_MINUTES}m poll=${POLL_SECS}s bash=${BASH_VERSION}"
 
 # --- create the bus branch (orphan: README + jobs/ + results/) ---
 git clone --quiet --depth 1 "$REPO_URL" "$BUS_DIR"
@@ -103,7 +103,12 @@ list_jobs() {
 
 last_activity=$(date +%s)
 end_reason="idle"
-declare -A seen done_jobs
+# Job bookkeeping uses marker files, not bash associative arrays:
+# macOS runners ship bash 3.2, which has no declare -A (the first
+# Intel session died on exactly that, 19 s in). Job ids come from
+# the job filenames and are safe as file names.
+STATE_DIR="${RUNNER_TEMP}/session-state"
+mkdir -p "$STATE_DIR/seen" "$STATE_DIR/done"
 
 while :; do
   bus_fetch
@@ -121,7 +126,7 @@ while :; do
   while IFS= read -r name; do
     [ -z "$name" ] && continue
     id="${name%.job}"
-    if [ -z "${done_jobs[$id]:-}" ]; then
+    if [ ! -e "$STATE_DIR/done/$id" ]; then
       next_job="$name"
       break
     fi
@@ -133,8 +138,8 @@ EOF
     continue
   fi
   id="${next_job%.job}"
-  if [ -z "${seen[$id]:-}" ]; then
-    seen[$id]=1
+  if [ ! -e "$STATE_DIR/seen/$id" ]; then
+    touch "$STATE_DIR/seen/$id"
     last_activity=$(date +%s) # a submission is activity
   fi
   echo "session: running job ${id}"
@@ -148,7 +153,7 @@ EOF
   printf 'state=%s\nexit=%d\nduration_s=%d\nfinished=%s\n' \
     "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "$rc" "$dur" "$(date -u +%FT%TZ)" \
     >"$BUS_DIR/results/${id}.state"
-  done_jobs[$id]=1
+  touch "$STATE_DIR/done/$id"
   last_activity=$(date +%s) # a completion is activity
   echo "session: job ${id} finished rc=${rc} in ${dur}s"
   bus_push "job ${id} done"
