@@ -1,0 +1,16 @@
+[package]
+name = "window-stream-perf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Measurement harness for the window-stream real frame path: pattern -> VP9 encode -> proto Frame fragmentation -> reassembly -> VP9 decode -> sink, with per-stage timing"
+
+[dependencies]
+anyhow.workspace = true
+codec = { package = "window-stream-codec", path = "../codec" }
+window-stream-proto = { path = "../proto" }
+bytes.workspace = true
+
+[[bin]]
+name = "perf-cycle"
+path = "src/main.rs"

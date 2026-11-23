@@ -8,6 +8,7 @@ members = [
     "crates/client",
     "crates/platform",
     "crates/e2e",
+    "crates/perf",
 ]
 # The Android Rust core stays a standalone crate: cargo-ndk builds it on its
 # own (with its own lockfile) from the GitHub Actions Android workflow.
