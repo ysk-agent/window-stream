@@ -1,0 +1,91 @@
+name: e2e-mac
+
+# macOS (Apple Silicon) build of the e2e binaries for the real-device
+# verification in docs/REAL_CAPTURE.md. The target Mac is on a
+# tethered connection with a nearly-full disk, so the binaries are
+# built here and only the stripped release binaries (plus the libvpx
+# dylib they link against) are transferred — no on-Mac build, no
+# crates.io download on the Mac.
+#
+# Scoped push trigger, same pattern as perf-cycle.yml: GitHub only
+# honours workflow_dispatch for workflows on the default branch, so
+# until this file lands on main, a push touching this file on the
+# track/mac-e2e branch acts as the dispatch.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - track/mac-e2e
+      - track/capture-scale
+    paths:
+      - ".github/workflows/e2e-mac.yml"
+
+jobs:
+  build-e2e:
+    name: Build e2e binaries (macOS arm64)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show runner info
+        run: |
+          sw_vers
+          uname -m
+          xcode-select -p || true
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install libvpx, pkg-config, protobuf
+        run: |
+          brew install libvpx pkg-config protobuf
+          # bindgen needs a findable libclang; the Xcode CLT copy is
+          # the first choice, Homebrew llvm is the fallback (same
+          # recipe as perf-cycle.yml).
+          CLT_LIBCLANG="/Library/Developer/CommandLineTools/usr/lib"
+          if [ -f "$CLT_LIBCLANG/libclang.dylib" ]; then
+            echo "LIBCLANG_PATH=$CLT_LIBCLANG" >> "$GITHUB_ENV"
+          else
+            brew install llvm
+            echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+          fi
+          pkg-config --modversion vpx
+
+      - name: Test crates/e2e (in-process, macOS)
+        run: cargo test -p window-stream-e2e --release
+
+      - name: Build release binaries
+        run: |
+          cargo build --release -p window-stream-e2e --bin e2e-host --bin e2e-client
+          cargo build --release -p window-stream-platform --bin platform_probe
+
+      - name: Assemble transfer bundle
+        run: |
+          mkdir -p dist/lib
+          cp target/release/e2e-host target/release/e2e-client target/release/platform_probe dist/
+          # The codec links libvpx dynamically; ship the exact dylib
+          # the binaries were built against as a fallback for
+          # DYLD_LIBRARY_PATH (the target Mac has the same Homebrew
+          # libvpx 1.17.0, so its install name should resolve as-is).
+          cp -L "$(pkg-config --variable=libdir vpx)/libvpx.12.dylib" dist/lib/ || \
+            cp -L "$(pkg-config --variable=libdir vpx)"/libvpx.*.dylib dist/lib/
+          strip dist/e2e-host dist/e2e-client dist/platform_probe
+          {
+            echo "commit: $GITHUB_SHA"
+            sw_vers
+            uname -m
+            echo "libvpx (pkg-config): $(pkg-config --modversion vpx)"
+            rustc --version
+          } > dist/env.txt
+          otool -L dist/e2e-host dist/e2e-client dist/platform_probe > dist/otool.txt
+          ls -lh dist dist/lib
+          (cd dist && shasum -a 256 e2e-host e2e-client platform_probe lib/libvpx.*.dylib > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Upload transfer bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-macos-arm64
+          path: dist/
+          if-no-files-found: error

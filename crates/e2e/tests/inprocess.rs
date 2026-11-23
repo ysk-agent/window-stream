@@ -167,3 +167,40 @@ fn real_capture_source_fails_fast_on_stub() {
         Err(e) => assert!(e.to_string().contains("not found"), "unexpected error: {e}"),
     }
 }
+
+/// Regression test for the 2026-11-23 Mac finding: a real capture
+/// source numbers frames by its capture sequence, and frames dropped
+/// at the depth-1 channel leave gaps (0, 37, 74, ...) in the seqs
+/// the host sends. Those gaps are NOT packet loss — the old
+/// ack-to-ack gap rule invalidated the reference on nearly every
+/// ack (28 invalidations / 30 frames on the Mac). With sent-aware
+/// tracking, consecutive acks of actually-sent frames must produce
+/// zero invalidations and a single keyframe.
+#[test]
+fn sparse_capture_seqs_do_not_invalidate_inprocess() {
+    const SEQS: [u64; 5] = [0, 37, 74, 111, 148];
+    const W: u32 = 64;
+    const H: u32 = 48;
+    let (tx, source) = CapturedFrameSource::channel(7, "sparse seq window");
+    std::thread::spawn(move || {
+        for seq in SEQS {
+            let frame = bgra_pattern_frame(W, H, seq);
+            tx.send(frame).expect("feed BGRA frame");
+        }
+    });
+    let mut sink = CountingSink::default();
+    let (host, client) = run_inprocess_with_source(SEQS.len() as u64, &mut sink, source)
+        .expect("in-process sparse-seq e2e");
+    assert_eq!(host.frames_sent, SEQS.len() as u64);
+    assert_eq!(client.frames_decoded, SEQS.to_vec());
+    assert_eq!(client.decode_errors, 0);
+    assert_eq!(host.acks_received, SEQS.to_vec());
+    assert_eq!(
+        host.invalidations, 0,
+        "capture-seq gaps between sent frames are not loss"
+    );
+    assert_eq!(
+        host.keyframes_sent, 1,
+        "only the first frame should be a keyframe"
+    );
+}

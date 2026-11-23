@@ -338,3 +338,28 @@ fn decoder_rejects_garbage() {
     };
     assert!(dec.decode(&junk).is_err());
 }
+
+#[test]
+fn sparse_seqs_do_not_trip_ack_stall() {
+    // Regression: frame seqs come from the source and need not be
+    // dense. A capture source numbering by its own sequence (with
+    // stale frames dropped before the host) produces seqs like
+    // 0, 100, 200 — gaps of 100 between frames that are, in frame
+    // terms, consecutive. The stall threshold is denominated in
+    // frames, so acks advancing one frame at a time must never trip
+    // it, however large the seq gaps are. (Before the index-based
+    // fix, the second frame already read as "100 frames behind".)
+    let mut enc = Vp9Encoder::new(EncoderConfig::realtime(W, H, 1500)).unwrap();
+    let mut keyframes = 0;
+    for seq in [0u64, 100, 200, 300, 400] {
+        let out = enc.encode(&moving_rectangle(W, H, seq).unwrap()).unwrap();
+        if out[0].is_keyframe {
+            keyframes += 1;
+        }
+        enc.set_reference_constraint(Some(seq));
+    }
+    assert_eq!(
+        keyframes, 1,
+        "only the first frame may be a keyframe when acks keep up in frame terms"
+    );
+}

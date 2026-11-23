@@ -27,7 +27,7 @@ tokio does I/O only).
 
 ## Binaries
 
-- `e2e-host [--port 4433] [--frames 30] [--source pattern|real] [--window <id>] [--fps 30]` — WebTransport host (VP9).
+- `e2e-host [--port 4433] [--frames 30] [--source pattern|real] [--window <id>] [--fps 30] [--scale native|point] [--pace fixed|ack]` — WebTransport host (VP9). Defaults (since the 2026-11-23 improvement cycle, see `docs/REAL_CAPTURE.md`): `--scale point` captures at the window's point size (1x) instead of native Retina pixels; `--pace ack` paces sends by FrameAck arrival (adaptive) instead of a fixed 33 ms window. Pass `--scale native --pace fixed` to reproduce the pre-cycle behavior.
   `--source real` captures one macOS window via ScreenCaptureKit
   (BGRA -> I420, Retina sizes included); on Linux / CI the stub
   backend fails fast instead of faking frames. See

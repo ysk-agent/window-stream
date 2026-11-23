@@ -49,6 +49,7 @@ use anyhow::{anyhow, Context, Result};
 use codec::pattern::moving_rectangle;
 use codec::I420Frame;
 use tracing::info;
+use window_stream_platform::types::Rect;
 use window_stream_platform::{
     convert::frame_to_i420, create_backend, CaptureConfig, CaptureSession, CapturedFrame,
     PixelFormat, PlatformError, WindowId,
@@ -278,6 +279,38 @@ pub struct RealCaptureSource {
     session: Box<dyn CaptureSession>,
 }
 
+/// Capture resolution policy for [`RealCaptureSource`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaptureScale {
+    /// The window's native pixel size (Retina 2x included). A
+    /// 1680x1050 pt window is captured at 3360x2100 px.
+    #[default]
+    Native,
+    /// The window's point size (1x): the same window is captured at
+    /// 1680x1050 px — a quarter of the pixels, a quarter of the
+    /// encode work. ScreenCaptureKit does the scaling itself when
+    /// given an explicit output size, so this costs no CPU on the
+    /// conversion path. Added after the 2026-11-23 Mac run, where
+    /// native full-screen Retina capture needed ~83 ms per frame
+    /// against a 33 ms capture interval and produced a keyframe
+    /// chain (17 keyframes / 30 frames).
+    Point,
+}
+
+/// The `CaptureConfig` output size for a window with point `bounds`
+/// under `scale`: `(0, 0)` (backend default) for
+/// [`CaptureScale::Native`], the rounded point size for
+/// [`CaptureScale::Point`].
+pub fn capture_output_size(bounds: &Rect, scale: CaptureScale) -> (u32, u32) {
+    match scale {
+        CaptureScale::Native => (0, 0),
+        CaptureScale::Point => (
+            (bounds.width.round() as u32).max(1),
+            (bounds.height.round() as u32).max(1),
+        ),
+    }
+}
+
 impl RealCaptureSource {
     /// Start capturing `window_id` at up to `max_fps` fps.
     ///
@@ -286,6 +319,12 @@ impl RealCaptureSource {
     /// ScreenCaptureKit produces most cheaply — and the callback
     /// feeds the depth-1 channel, dropping stale frames.
     pub fn start(window_id: u32, max_fps: u32) -> Result<Self> {
+        Self::start_with_scale(window_id, max_fps, CaptureScale::Native)
+    }
+
+    /// Start capturing `window_id` at up to `max_fps` fps, with an
+    /// explicit [`CaptureScale`] (native pixels vs point size).
+    pub fn start_with_scale(window_id: u32, max_fps: u32, scale: CaptureScale) -> Result<Self> {
         let backend = create_backend();
         info!(
             backend = backend.name(),
@@ -315,9 +354,16 @@ impl RealCaptureSource {
                 // The source is gone; nothing left to do.
             }
         });
+        let (out_w, out_h) = capture_output_size(&info.bounds, scale);
+        info!(
+            scale = ?scale,
+            output_width = out_w,
+            output_height = out_h,
+            "real capture output size"
+        );
         let config = CaptureConfig {
-            width: 0,
-            height: 0,
+            width: out_w,
+            height: out_h,
             max_fps,
             pixel_format: PixelFormat::Bgra8888,
             show_cursor: false,
@@ -367,6 +413,19 @@ impl FrameSource for RealCaptureSource {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn capture_output_size_native_and_point() {
+        let bounds = Rect::new(0.0, 0.0, 1680.0, 1050.0);
+        assert_eq!(capture_output_size(&bounds, CaptureScale::Native), (0, 0));
+        assert_eq!(
+            capture_output_size(&bounds, CaptureScale::Point),
+            (1680, 1050)
+        );
+        // Fractional point bounds round to the nearest pixel.
+        let odd = Rect::new(10.0, 10.0, 762.4, 719.6);
+        assert_eq!(capture_output_size(&odd, CaptureScale::Point), (762, 720));
+    }
+
     use super::*;
     use window_stream_platform::types::WindowId as PlatformWindowId;
 

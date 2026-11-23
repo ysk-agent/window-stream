@@ -191,3 +191,56 @@ failures name the permission; a missing window names the id).
   `e2e-client` is verified by building on the Mac in the procedure
   above (the platform crate alone, which has no such dependency,
   is what the `platform-mac` CI workflow cross-checks).
+
+## Improvement cycle, 2026-11-23 (track/capture-scale)
+
+The baseline run above (native Retina capture, fixed pacing) showed
+a keyframe chain: 17 keyframes in 30 frames, 28 invalidations,
+~12 fps sustained, ~11.4 Mbps effective. Root causes, all fixed on
+this branch:
+
+1. The host invalidated whenever an ack's capture seq jumped by
+   more than 1 — but capture seqs are sparse by design (stale frames
+   drop at the depth-1 channel), so nearly every ack was a false
+   invalidation. `AckTracker` now invalidates only when an ack skips
+   a frame the host actually sent (one ack of grace for reordering).
+2. The codec's ack-stall keyframe rule compared raw seq differences
+   against a frame-count threshold (30), so sparse capture seqs
+   forced a keyframe almost every frame. It now counts encoded
+   frames via a seq→index map.
+3. Encode time at 3360x2100 exceeded the fixed 33 ms pacing window.
+   Two mitigations, both measured below: `--scale point` (capture
+   at the window's point size, 1/4 the pixels) and `--pace ack`
+   (encode the next frame only once the previous sent frame is
+   acked, with an EMA-based deadline).
+
+Measured on the real Mac (MacBook-Air-3, loopback, 30 frames,
+full-screen 1680x1050 pt window; B/C/D target a Brave window, the
+baseline an Arc window — content differs, so treat encode/bitrate
+as indicative and keyframes/invalidations as the structural
+comparison; the baseline's encode figure is a frame-period
+estimate, B/C/D are instrumented):
+
+| Config | Encode avg | Sustained fps | Eff. bitrate | Keyframes | Invalidations |
+|---|---|---|---|---|---|
+| Baseline (native + fixed, pre-fix) | ~83 ms (est.) | 12.0 | ~11.4 Mbps | 17 | 28 |
+| B: point + fixed | 5 ms | 19.9 | 0.58 Mbps | 1 | 0 |
+| C: native + ack | 11 ms | 19.3 | 1.52 Mbps | 1 | 0 |
+| D: point + ack | 4 ms | 23.5 | 0.65 Mbps | 1 | 0 |
+
+Adopted: the two seq fixes (bug fixes, unconditional), plus
+`--scale point` and `--pace ack` as the new `e2e-host` defaults.
+Sustained fps in B/C/D is bounded by the capture cadence, not by
+encode. One D attempt was aborted by ScreenCaptureKit itself
+(SCStreamError -3821, "stream stopped by the system") and succeeded
+on immediate retry; that error path is the documented 5 s stall
+behaviour above.
+
+Build route for these runs: GitHub's arm64 macOS runners were
+unavailable all evening (10+ jobs died in queue), so the binaries
+were cross-compiled for `aarch64-apple-darwin` on a `macos-15-intel`
+session runner (libvpx 1.15.2 from source; its macOS target is
+`arm64-darwin20-gcc` — plain `arm64-darwin-gcc` builds an iOS dylib
+the macOS linker rejects; the codec's pkg-config probe needs
+`PKG_CONFIG_ALLOW_CROSS=1`). The e2e crate's tests also passed
+natively on macOS (x86_64) in the same session.
