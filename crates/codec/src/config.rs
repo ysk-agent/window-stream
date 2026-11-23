@@ -61,6 +61,26 @@ pub struct EncoderConfig {
     /// at the cost of ~10–15% more total host CPU time. Hosts running
     /// many windows at once may want to lower this per encoder.
     pub threads: u32,
+    /// Tile columns, log2 (`VP9E_SET_TILE_COLUMNS`): the frame is split
+    /// into `2^tile_columns_log2` independently-coded vertical tiles,
+    /// which libvpx can encode in parallel (in addition to row-MT).
+    /// Costs a small amount of compression (tiles break prediction
+    /// across their borders). 0 (default) = single tile. Perf cycle 2
+    /// measures the trade-off before any default is adopted.
+    pub tile_columns_log2: u32,
+    /// Screen-content tuning (`VP9E_SET_TUNE_CONTENT` =
+    /// `VP9E_CONTENT_SCREEN`): libvpx adjusts its mode decisions for
+    /// sharp-edged desktop content instead of camera video.
+    /// The realtime default is **true** (perf cycle 2, 2026-11-23):
+    /// on the harness's desktop patterns it cut motion bitrate by
+    /// 40% (720p) to 59% (1080p) while *raising* luma PSNR by ~4 dB,
+    /// at unchanged encode time; static content was unchanged.
+    /// Measured cost: on camera-like high-detail content (the harness
+    /// `noise` pattern — the closest analogue of a window playing a
+    /// full-screen video) bitrate and PSNR were unchanged but encode
+    /// p50 roughly doubled on the development VM. Hosts that stream
+    /// video-heavy windows may set this to false per encoder.
+    pub screen_content: bool,
     /// Automatic keyframe interval in frames. 0 disables periodic keyframes
     /// (keyframes only on start / explicit request), which is the protocol's
     /// preferred shape: loss recovery is driven by `FrameAck`, not a timer.
@@ -87,6 +107,27 @@ pub struct EncoderConfig {
     pub ack_stall_threshold_frames: u32,
 }
 
+/// Recommended encoder thread count for a host running
+/// `concurrent_windows` encoders at once (perf cycle 2, 2026-11-23).
+///
+/// With 3 encoders in parallel on the (1.5 vCPU-capped) development VM,
+/// 1 thread per encoder matched 2 threads per encoder on aggregate
+/// throughput (720p motion: 45–56 aggregate fps either way; 1080p
+/// motion: 25–27 either way) at equal or lower CPU per frame — once
+/// the host's cores are saturated, extra per-encoder threads only add
+/// synchronisation overhead. The single/focused-window case keeps the
+/// cycle-1 default of 2, where row-MT measurably cuts latency.
+/// Rule: total encoder threads should stay near the host's core
+/// budget; this returns 2 for 1–2 windows and 1 for 3 or more. It is
+/// a starting point for the host's own budgeting, not a cap.
+pub fn recommended_encoder_threads(concurrent_windows: u32) -> u32 {
+    if concurrent_windows >= 3 {
+        1
+    } else {
+        2
+    }
+}
+
 /// Default [`EncoderConfig::ack_stall_threshold_frames`]: force a
 /// keyframe once acks lag the encoder by more than 30 frames (~1 s at
 /// 30 fps). A safety net for ack stall, not a substitute for calling
@@ -103,6 +144,8 @@ impl EncoderConfig {
             fps: 30,
             cpu_used: 6,
             threads: 2,
+            tile_columns_log2: 0,
+            screen_content: true,
             keyframe_interval: 0,
             reference_mode: ReferenceMode::default(),
             error_resilient: true,
@@ -149,5 +192,26 @@ pub struct DecoderConfig {
 impl Default for DecoderConfig {
     fn default() -> Self {
         Self { threads: 2 }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn realtime_defaults_include_screen_content_tuning() {
+        let cfg = EncoderConfig::realtime(1280, 720, 2500);
+        assert!(cfg.screen_content);
+        assert_eq!(cfg.tile_columns_log2, 0);
+        assert_eq!(cfg.threads, 2);
+    }
+
+    #[test]
+    fn thread_budget_drops_to_one_at_three_windows() {
+        assert_eq!(recommended_encoder_threads(1), 2);
+        assert_eq!(recommended_encoder_threads(2), 2);
+        assert_eq!(recommended_encoder_threads(3), 1);
+        assert_eq!(recommended_encoder_threads(8), 1);
     }
 }

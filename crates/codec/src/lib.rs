@@ -26,7 +26,10 @@ pub mod ivf;
 pub mod pattern;
 pub mod sys;
 
-pub use config::{DecoderConfig, EncoderConfig, ReferenceMode, DEFAULT_ACK_STALL_THRESHOLD_FRAMES};
+pub use config::{
+    recommended_encoder_threads, DecoderConfig, EncoderConfig, ReferenceMode,
+    DEFAULT_ACK_STALL_THRESHOLD_FRAMES,
+};
 pub use decoder::Vp9Decoder;
 pub use encoder::Vp9Encoder;
 pub use error::{CodecError, Result};
