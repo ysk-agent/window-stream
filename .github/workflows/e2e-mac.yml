@@ -17,6 +17,7 @@ on:
   push:
     branches:
       - track/mac-e2e
+      - track/capture-scale
     paths:
       - ".github/workflows/e2e-mac.yml"
 
