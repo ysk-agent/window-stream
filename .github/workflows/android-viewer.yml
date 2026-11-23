@@ -57,10 +57,13 @@ jobs:
       # protoc: the proto crate's prost-build step.
       # libclang-dev: the codec crate's bindgen step.
       # pkg-config: the codec crate locates libvpx through it.
-      - name: Install protoc, libclang and pkg-config
+      # yasm: libvpx's x86 assembly is NASM-format; its configure
+      # auto-detects yasm/nasm when AS is unset (the build script
+      # leaves AS unset for the x86_64 ABI only).
+      - name: Install protoc, libclang, pkg-config and yasm
         run: |
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler libclang-dev pkg-config
+          sudo apt-get install -y protobuf-compiler libclang-dev pkg-config yasm
           LIBCLANG_DIR="$(dirname "$(find /usr/lib -name 'libclang.so' -print -quit)")"
           echo "LIBCLANG_PATH=$LIBCLANG_DIR" >> "$GITHUB_ENV"
           echo "libclang at $LIBCLANG_DIR"

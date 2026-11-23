@@ -28,9 +28,12 @@ fi
 
 TOOLCHAIN_BIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-# args: <vpx-target> <clang-binary-prefix> <abi>
+# args: <vpx-target> <clang-binary-prefix> <abi> <as-mode>
+# as-mode "clang" uses the clang driver with -c (ARM assembly);
+# as-mode "auto" leaves AS unset so configure finds yasm/nasm (x86
+# assembly is NASM-format and configure adds -f elf64 itself).
 build_one() {
-  local vpx_target="$1" cc_name="$2" abi="$3"
+  local vpx_target="$1" cc_name="$2" abi="$3" as_mode="$4"
   local prefix="$OUT_ROOT/$abi"
   local build_dir="/tmp/libvpx-build-$abi"
   rm -rf "$build_dir"
@@ -47,7 +50,11 @@ build_one() {
     # AS gets "-c": libvpx's armv7 .asm.S rule invokes $(AS) without
     # -c (a standalone `as` always emits an object), but the clang
     # driver would try to link an executable and fail on `main`.
-    export AS="$TOOLCHAIN_BIN/$cc_name -c"
+    if [ "$as_mode" = "clang" ]; then
+      export AS="$TOOLCHAIN_BIN/$cc_name -c"
+    else
+      unset AS
+    fi
     export STRIP="$TOOLCHAIN_BIN/llvm-strip"
     export RANLIB="$TOOLCHAIN_BIN/llvm-ranlib"
     export NM="$TOOLCHAIN_BIN/llvm-nm"
@@ -82,6 +89,6 @@ build_one() {
   ls -l "$prefix/lib/libvpx.a" "$prefix/lib/pkgconfig/vpx.pc"
 }
 
-build_one arm64-android-gcc "aarch64-linux-android${API}-clang" arm64-v8a
-build_one armv7-android-gcc "armv7a-linux-androideabi${API}-clang" armeabi-v7a
-build_one x86_64-android-gcc "x86_64-linux-android${API}-clang" x86_64
+build_one arm64-android-gcc "aarch64-linux-android${API}-clang" arm64-v8a clang
+build_one armv7-android-gcc "armv7a-linux-androideabi${API}-clang" armeabi-v7a clang
+build_one x86_64-android-gcc "x86_64-linux-android${API}-clang" x86_64 auto
