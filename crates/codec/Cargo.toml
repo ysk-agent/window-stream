@@ -1,0 +1,22 @@
+[package]
+name = "window-stream-codec"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "VP9 encoder/decoder for window-stream: realtime libvpx wrapper with reference invalidation"
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+
+[lib]
+name = "codec"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = "1"
+
+[build-dependencies]
+bindgen = "0.71"
+pkg-config = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
