@@ -190,6 +190,22 @@ impl FrameReassembler {
     pub fn push(&mut self, datagram: &[u8]) -> Result<Option<(FrameHeader, Bytes)>, DatagramError> {
         let (header, payload) = FrameHeader::decode(datagram)?;
         if header.fragment_count == 1 {
+            // The fast path must respect the same staleness rules as
+            // the multi-fragment path below: a delayed single-fragment
+            // frame must not discard a newer frame already being
+            // assembled, and a single-fragment datagram claiming the
+            // same seq as a pending multi-fragment frame contradicts
+            // that frame's fragment count.
+            match self.pending.get(&header.window_id) {
+                Some(entry) if entry.seq > header.seq => return Ok(None),
+                Some(entry) if entry.seq == header.seq => {
+                    return Err(DatagramError::InvalidFragment {
+                        index: header.fragment_index,
+                        count: header.fragment_count,
+                    });
+                }
+                _ => {}
+            }
             self.pending.remove(&header.window_id);
             return Ok(Some((header, Bytes::copy_from_slice(payload))));
         }
@@ -444,6 +460,42 @@ mod tests {
         // Delayed frame-1 fragment: ignored, and nothing else completes.
         assert!(re.push(&a[1]).unwrap().is_none());
         assert!(re.push(&a[2]).unwrap().is_none());
+    }
+
+    #[test]
+    fn delayed_stale_single_fragment_does_not_clobber_newer_frame() {
+        // Same shape as delayed_stale_fragment_does_not_clobber_newer_frame,
+        // but the stale frame is a single fragment: before the fix it
+        // took the fast path and discarded frame 2's assembly.
+        let stale = fragment_frame(1, 1, true, &[7u8; 10], 1200).unwrap();
+        assert_eq!(stale.len(), 1);
+        let b = fragment_frame(1, 2, true, &[9u8; 3000], 1200).unwrap();
+        let mut re = FrameReassembler::new();
+        assert!(re.push(&b[0]).unwrap().is_none());
+        assert!(re.push(&b[1]).unwrap().is_none());
+        // Delayed stale single-fragment frame: ignored.
+        assert!(re.push(&stale[0]).unwrap().is_none());
+        let done = re.push(&b[2]).unwrap().expect("frame 2 completes");
+        assert_eq!(done.0.seq, 2);
+        assert_eq!(&done.1[..], &[9u8; 3000][..]);
+    }
+
+    #[test]
+    fn single_fragment_claiming_pending_seq_is_rejected() {
+        // Frame 2 is being assembled from 3 fragments; a single-fragment
+        // datagram claiming seq 2 contradicts its fragment count.
+        let single = fragment_frame(1, 2, true, &[9u8; 10], 1200).unwrap();
+        let b = fragment_frame(1, 2, true, &[9u8; 3000], 1200).unwrap();
+        let mut re = FrameReassembler::new();
+        assert!(re.push(&b[0]).unwrap().is_none());
+        assert!(matches!(
+            re.push(&single[0]),
+            Err(DatagramError::InvalidFragment { .. })
+        ));
+        // The pending assembly is untouched and still completes.
+        assert!(re.push(&b[1]).unwrap().is_none());
+        let done = re.push(&b[2]).unwrap().expect("frame 2 completes");
+        assert_eq!(done.0.seq, 2);
     }
 
     #[test]
