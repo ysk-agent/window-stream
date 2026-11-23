@@ -62,10 +62,23 @@ impl SelfSignedIdentity {
     /// (e.g. `["localhost", "127.0.0.1", "::1"]`).
     pub fn generate(sans: &[&str]) -> Result<Self, TransportError> {
         let subject_alt_names: Vec<String> = sans.iter().map(|s| s.to_string()).collect();
-        let certified = rcgen::generate_simple_self_signed(subject_alt_names)
+        // Explicit validity window: WebTransport certificate-hash
+        // pinning (wtransport's ServerHashVerification) rejects
+        // certificates whose total validity exceeds 14 days, and
+        // rcgen's simple-self-signed default is far longer than that.
+        // ECDSA P-256 is likewise required by that verifier.
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
             .map_err(|e| TransportError::Cert(e.to_string()))?;
-        let cert_der = certified.cert.der().to_vec();
-        let key_der = certified.key_pair.serialize_der();
+        let mut params = rcgen::CertificateParams::new(subject_alt_names)
+            .map_err(|e| TransportError::Cert(e.to_string()))?;
+        let now = time::OffsetDateTime::now_utc();
+        params.not_before = now - time::Duration::hours(1);
+        params.not_after = now + time::Duration::days(13);
+        let certified = params
+            .self_signed(&key_pair)
+            .map_err(|e| TransportError::Cert(e.to_string()))?;
+        let cert_der = certified.der().to_vec();
+        let key_der = key_pair.serialize_der();
         let certificate = Certificate::from_der(cert_der)
             .map_err(|e| TransportError::Cert(e.to_string()))?;
         let cert_hash = certificate.hash();
