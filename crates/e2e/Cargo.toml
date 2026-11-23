@@ -1,0 +1,30 @@
+[package]
+name = "window-stream-e2e"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "End-to-end wiring for window-stream: dummy test pattern -> VP9 encode -> proto Frame datagrams -> VP9 decode -> client FrameSink, with FrameAck feeding the encoder reference constraint"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+window-stream-proto = { path = "../proto" }
+window-stream-transport = { path = "../transport" }
+window-stream-client = { path = "../client" }
+codec = { package = "window-stream-codec", path = "../codec" }
+
+# Only used by the e2e-client --display shell (winit window + wgpu
+# Compositor from window-stream-client).
+winit = "0.30"
+wgpu = "0.20"
+pollster = "0.3"
+
+[[bin]]
+name = "e2e-host"
+path = "src/bin/e2e_host.rs"
+
+[[bin]]
+name = "e2e-client"
+path = "src/bin/e2e_client.rs"
