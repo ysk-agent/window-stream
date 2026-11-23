@@ -1,7 +1,7 @@
 name: platform-mac
 
 # macOS (Apple Silicon) verification for crates/platform.
-# Builds and tests the platform crate natively on a macOS 14 arm64
+# Builds and tests the platform crate natively on a macOS arm64
 # runner and uploads the platform_probe sample binary so it can be
 # run on a real Mac without building there.
 
@@ -17,7 +17,7 @@ on:
 jobs:
   build-test:
     name: Build + test crates/platform (macOS arm64)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
