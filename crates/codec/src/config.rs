@@ -108,23 +108,26 @@ pub struct EncoderConfig {
 }
 
 /// Recommended encoder thread count for a host running
-/// `concurrent_windows` encoders at once (perf cycle 2, 2026-11-23).
+/// `concurrent_windows` encoders at once on `cores` CPU cores
+/// (perf cycle 2, 2026-11-23; revised in the cycle-2 fix-up after the
+/// watcher review caught untraceable multi-run data).
 ///
-/// With 3 encoders in parallel on the (1.5 vCPU-capped) development VM,
-/// 1 thread per encoder matched 2 threads per encoder on aggregate
-/// throughput (720p motion: 45–56 aggregate fps either way; 1080p
-/// motion: 25–27 either way) at equal or lower CPU per frame — once
-/// the host's cores are saturated, extra per-encoder threads only add
-/// synchronisation overhead. The single/focused-window case keeps the
-/// cycle-1 default of 2, where row-MT measurably cuts latency.
-/// Rule: total encoder threads should stay near the host's core
-/// budget; this returns 2 for 1–2 windows and 1 for 3 or more. It is
-/// a starting point for the host's own budgeting, not a cap.
-pub fn recommended_encoder_threads(concurrent_windows: u32) -> u32 {
-    if concurrent_windows >= 3 {
-        1
-    } else {
+/// Prefer 2 threads per encoder whenever the total fits the core
+/// budget (`2 * windows <= cores`): 2 threads is better or equal on
+/// every measured axis — single-window aggregate fps 71.5 vs 46.6 at
+/// 720p (32.0 vs 24.5 at 1080p), and at 3 windows CPU per frame is a
+/// wash (720p: 19.1 vs 20.2 ms mean; 1080p: 41.7 vs 41.9 ms mean).
+/// Drop to 1 only to avoid oversubscribing the cores, because 1
+/// thread costs bitrate: at 3 windows, 1 thread spent +20% more bits
+/// at 1080p motion (2179 vs 1817 kbps per window; +4.5% at 720p) for
+/// the same content. It is a starting point for the host's own
+/// budgeting, not a cap.
+pub fn recommended_encoder_threads(concurrent_windows: u32, cores: u32) -> u32 {
+    let cores = cores.max(1);
+    if concurrent_windows.saturating_mul(2) <= cores {
         2
+    } else {
+        1
     }
 }
 
@@ -208,10 +211,14 @@ mod tests {
     }
 
     #[test]
-    fn thread_budget_drops_to_one_at_three_windows() {
-        assert_eq!(recommended_encoder_threads(1), 2);
-        assert_eq!(recommended_encoder_threads(2), 2);
-        assert_eq!(recommended_encoder_threads(3), 1);
-        assert_eq!(recommended_encoder_threads(8), 1);
+    fn thread_budget_prefers_two_within_core_budget() {
+        assert_eq!(recommended_encoder_threads(1, 8), 2);
+        assert_eq!(recommended_encoder_threads(2, 4), 2);
+        assert_eq!(recommended_encoder_threads(3, 8), 2);
+        // 3 windows x 2 threads = 6 > 2 cores: drop to 1 to avoid
+        // oversubscription; likewise 8 windows on 8 cores.
+        assert_eq!(recommended_encoder_threads(3, 2), 1);
+        assert_eq!(recommended_encoder_threads(8, 8), 1);
+        assert_eq!(recommended_encoder_threads(2, 3), 1);
     }
 }
