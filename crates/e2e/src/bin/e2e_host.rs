@@ -10,10 +10,12 @@
 //!   `docs/REAL_CAPTURE.md`. On Linux / in CI the stub backend makes
 //!   this fail fast with a clear error instead of faking frames.
 //!
-//! Usage: `e2e-host [--port 4433] [--frames 30] [--source pattern|real] [--window <id>] [--fps 30]`
+//! Usage: `e2e-host [--port 4433] [--frames 30] [--source pattern|real] [--window <id>] [--fps 30] [--scale native|point] [--pace fixed|ack]`
 //! Prints the certificate hash a client must pin (`--cert-hash`).
 use anyhow::{Context, Result};
-use window_stream_e2e::{start_host_on, PatternSource, RealCaptureSource};
+use window_stream_e2e::{
+    start_host_on_with_pace, CaptureScale, PaceMode, PatternSource, RealCaptureSource,
+};
 fn arg(name: &str, default: &str) -> String {
     let a: Vec<String> = std::env::args().collect();
     a.windows(2)
@@ -33,15 +35,25 @@ async fn run() -> Result<()> {
     // Start the source *before* binding / printing the cert hash, so
     // a bad window id or a missing Screen Recording grant fails
     // fast with no listener left behind.
+    let pace = match arg("--pace", "fixed").as_str() {
+        "fixed" => PaceMode::Fixed,
+        "ack" => PaceMode::Ack,
+        other => anyhow::bail!("unknown --pace {other:?} (want fixed|ack)"),
+    };
     let handle = match source_name.as_str() {
-        "pattern" => start_host_on(addr, frames, PatternSource::new()).await?,
+        "pattern" => start_host_on_with_pace(addr, frames, PatternSource::new(), pace).await?,
         "real" => {
             let window: u32 = arg("--window", "")
                 .parse()
                 .context("--source real needs --window <id> (see `platform_probe --list`)")?;
             let fps: u32 = arg("--fps", "30").parse()?;
-            let source = RealCaptureSource::start(window, fps)?;
-            start_host_on(addr, frames, source).await?
+            let scale = match arg("--scale", "native").as_str() {
+                "native" => CaptureScale::Native,
+                "point" => CaptureScale::Point,
+                other => anyhow::bail!("unknown --scale {other:?} (want native|point)"),
+            };
+            let source = RealCaptureSource::start_with_scale(window, fps, scale)?;
+            start_host_on_with_pace(addr, frames, source, pace).await?
         }
         other => anyhow::bail!("unknown --source {other:?} (want pattern|real)"),
     };
@@ -52,7 +64,8 @@ async fn run() -> Result<()> {
         .join()
         .map_err(|_| anyhow::anyhow!("host thread panicked"))?
         .context("host pipeline")?;
-    println!("done: frames_encoded={} frames_sent={} keyframes_sent={} encoded_bytes_total={} acks_received={:?} invalidations={}", s.frames_encoded, s.frames_sent, s.keyframes_sent, s.encoded_bytes_total, s.acks_received, s.invalidations);
+    let encode_ms_avg = s.encode_ms_total.checked_div(s.frames_encoded).unwrap_or(0);
+    println!("done: frames_encoded={} frames_sent={} keyframes_sent={} encoded_bytes_total={} acks_received={:?} invalidations={} encode_ms_avg={} encode_ms_max={} stream_ms={}", s.frames_encoded, s.frames_sent, s.keyframes_sent, s.encoded_bytes_total, s.acks_received, s.invalidations, encode_ms_avg, s.encode_ms_max, s.stream_ms);
     Ok(())
 }
 

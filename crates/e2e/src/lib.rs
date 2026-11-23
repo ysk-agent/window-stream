@@ -55,8 +55,8 @@
 pub mod source;
 
 pub use source::{
-    captured_frame_to_i420, CapturedFrameSource, FrameSource, PatternSource, RealCaptureSource,
-    ReferenceFn, CAPTURE_FRAME_TIMEOUT,
+    capture_output_size, captured_frame_to_i420, CaptureScale, CapturedFrameSource, FrameSource,
+    PatternSource, RealCaptureSource, ReferenceFn, CAPTURE_FRAME_TIMEOUT,
 };
 
 use anyhow::{Context, Result};
@@ -220,6 +220,15 @@ pub struct HostStats {
     pub acks_received: Vec<u64>,
     /// Times a gap / stall in acks forced `invalidate_reference()`.
     pub invalidations: u64,
+    /// Total wall time inside `Vp9Encoder::encode`, milliseconds.
+    pub encode_ms_total: u64,
+    /// Slowest single `Vp9Encoder::encode` call, milliseconds.
+    pub encode_ms_max: u64,
+    /// Wall time of the streaming loop (first frame pull to the end
+    /// of the final ack drain), milliseconds. Sustained fps is
+    /// `frames_sent / (stream_ms / 1000)`; effective bitrate is
+    /// `encoded_bytes_total * 8 / (stream_ms / 1000)`.
+    pub stream_ms: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -235,6 +244,112 @@ pub struct ClientStats {
 // ---------------------------------------------------------------------------
 // Host pipeline (WebTransport)
 // ---------------------------------------------------------------------------
+
+/// How the host paces frame sends and collects FrameAcks between
+/// encodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaceMode {
+    /// Fixed ~33 ms window after each frame (the original v1
+    /// behaviour). If encoding takes longer than the window, acks
+    /// arrive after the next frame is already encoded and the
+    /// reference constraint lags one frame behind.
+    #[default]
+    Fixed,
+    /// Ack-clocked: after each frame, wait until the FrameAck for
+    /// the last sent frame arrives (deadline adapts to the measured
+    /// encode time), so the next frame is encoded with its
+    /// predecessor already confirmed as reference. The sustained
+    /// rate falls to whatever encode + decode + ack round trip
+    /// supports instead of dropping stale frames against a fixed
+    /// 30 fps clock.
+    Ack,
+}
+
+/// Mutable pacing state threaded through the host loop: the mode,
+/// the seq of the most recently sent frame, and the encode-time
+/// exponential moving average the ack-clocked deadline adapts to.
+#[derive(Debug, Clone, Copy)]
+struct PaceState {
+    mode: PaceMode,
+    last_sent: u64,
+    encode_ema_ms: f64,
+}
+
+/// Bookkeeping for which sent frames the client has confirmed.
+///
+/// The invalidation rule lives here: a FrameAck that *skips a frame
+/// the host actually sent* means that frame was lost (never decoded,
+/// never acked) and the reference chain through it is broken. A gap
+/// between consecutive *ack* values is NOT loss by itself — a real
+/// capture source numbers frames by its own capture sequence, and
+/// frames dropped at the source (depth-1 channel) were never sent,
+/// so their seqs legitimately never appear. The original v1 rule
+/// compared ack-to-ack and invalidated on every capture-seq gap:
+/// on the 2026-11-23 Mac run that produced 28 invalidations and
+/// 17 keyframes in 30 frames, all false positives.
+///
+/// One ack of grace is allowed for ack reordering (acks are
+/// datagrams too): a skipped sent frame first becomes *suspect*;
+/// only when the next ack also skips it is it treated as lost and
+/// the reference invalidated (once, however many were lost).
+#[derive(Debug, Default)]
+pub struct AckTracker {
+    last_ack: Option<u64>,
+    unacked: std::collections::BTreeSet<u64>,
+    suspect: std::collections::BTreeSet<u64>,
+}
+
+impl AckTracker {
+    pub fn on_sent(&mut self, seq: u64) {
+        self.unacked.insert(seq);
+    }
+
+    /// Whether `seq` has been acked (no longer in the unacked set).
+    pub fn is_acked(&self, seq: u64) -> bool {
+        !self.unacked.contains(&seq)
+    }
+
+    pub fn on_ack(
+        &mut self,
+        encoder: &mut Vp9Encoder,
+        stats: &mut HostStats,
+        window_id: u64,
+        seq: u64,
+    ) {
+        self.unacked.remove(&seq);
+        self.suspect.remove(&seq);
+        // Sent frames older than this ack that are still unacked
+        // were skipped by it. Suspects from an earlier ack are
+        // confirmed lost now; new skips get their one-ack grace.
+        let skipped: Vec<u64> = self.unacked.iter().copied().filter(|&s| s < seq).collect();
+        let confirmed = skipped.iter().any(|sq| self.suspect.contains(sq));
+        if confirmed {
+            encoder.invalidate_reference();
+            stats.invalidations += 1;
+            info!(
+                stream = "datagram",
+                ack = seq,
+                skipped = ?skipped,
+                "FrameAck skipped sent frame(s): reference invalidated"
+            );
+            for sq in &skipped {
+                self.unacked.remove(sq);
+                self.suspect.remove(sq);
+            }
+        } else {
+            for sq in skipped {
+                self.suspect.insert(sq);
+            }
+        }
+        encoder.set_reference_constraint(Some(seq));
+        self.last_ack = Some(seq);
+        stats.acks_received.push(seq);
+        info!(
+            stream = "datagram",
+            window_id, seq, "received FrameAck -> set_reference_constraint"
+        );
+    }
+}
 
 pub struct HostHandle {
     pub addr: std::net::SocketAddr,
@@ -284,7 +399,43 @@ where
             .enable_all()
             .build()
             .context("build host runtime")?;
-        rt.block_on(run_host_with_source(endpoint, frame_count, source))
+        rt.block_on(run_host_with_source(
+            endpoint,
+            frame_count,
+            source,
+            PaceMode::Fixed,
+        ))
+    });
+    Ok(HostHandle {
+        addr,
+        cert_hash_hex,
+        task,
+    })
+}
+
+/// Start a host like [`start_host_on`], with an explicit
+/// [`PaceMode`] (`e2e-host --pace`).
+pub async fn start_host_on_with_pace<S>(
+    addr: std::net::SocketAddr,
+    frame_count: u64,
+    source: S,
+    pace: PaceMode,
+) -> Result<HostHandle>
+where
+    S: FrameSource + Send + 'static,
+{
+    let identity = SelfSignedIdentity::generate(&["localhost", "127.0.0.1", "::1"])
+        .context("generate self-signed identity")?;
+    let cert_hash_hex = identity.cert_hash_hex().to_string();
+    let endpoint = HostEndpoint::bind(addr, identity).context("bind host endpoint")?;
+    let addr = endpoint.local_addr();
+    info!(%addr, "e2e-host listening");
+    let task = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("build host runtime")?;
+        rt.block_on(run_host_with_source(endpoint, frame_count, source, pace))
     });
     Ok(HostHandle {
         addr,
@@ -294,7 +445,7 @@ where
 }
 
 pub async fn run_host(endpoint: HostEndpoint, frame_count: u64) -> Result<HostStats> {
-    run_host_with_source(endpoint, frame_count, PatternSource::new()).await
+    run_host_with_source(endpoint, frame_count, PatternSource::new(), PaceMode::Fixed).await
 }
 
 /// Host pipeline over WebTransport, pulling frames from `source`.
@@ -316,6 +467,7 @@ pub async fn run_host_with_source<S>(
     endpoint: HostEndpoint,
     frame_count: u64,
     mut source: S,
+    pace: PaceMode,
 ) -> Result<HostStats>
 where
     S: FrameSource,
@@ -336,6 +488,7 @@ where
         session.close(0, "done");
         return Ok(stats);
     }
+    let stream_start = std::time::Instant::now();
     let first = source.next_frame().context("first frame from source")?;
     let (width, height) = (first.width(), first.height());
     let window_id = source.window_id();
@@ -367,18 +520,32 @@ where
     );
     let mut encoder =
         Vp9Encoder::new(encoder_config_for(width, height)).context("create VP9 encoder")?;
-    let mut last_ack: Option<u64> = None;
+    let mut tracker = AckTracker::default();
 
-    send_encoded(
+    let (last_seq, ms) = send_encoded(
         &session,
         &mut encoder,
         &first,
         window_id,
         max_dg,
         &mut stats,
+        &mut tracker,
     )
     .await?;
-    pace_and_collect_acks(&session, &mut encoder, &mut stats, &mut last_ack, window_id).await;
+    let mut pace_state = PaceState {
+        mode: pace,
+        last_sent: last_seq,
+        encode_ema_ms: ms,
+    };
+    pace_and_collect_acks(
+        &session,
+        &mut encoder,
+        &mut stats,
+        &mut tracker,
+        window_id,
+        &pace_state,
+    )
+    .await;
 
     for _ in 1..frame_count {
         let frame = source.next_frame().context("next frame from source")?;
@@ -392,16 +559,27 @@ where
                 frame.height()
             );
         }
-        send_encoded(
+        let (seq, ms) = send_encoded(
             &session,
             &mut encoder,
             &frame,
             window_id,
             max_dg,
             &mut stats,
+            &mut tracker,
         )
         .await?;
-        pace_and_collect_acks(&session, &mut encoder, &mut stats, &mut last_ack, window_id).await;
+        pace_state.last_sent = seq;
+        pace_state.encode_ema_ms = 0.7 * pace_state.encode_ema_ms + 0.3 * ms;
+        pace_and_collect_acks(
+            &session,
+            &mut encoder,
+            &mut stats,
+            &mut tracker,
+            window_id,
+            &pace_state,
+        )
+        .await;
     }
     // Drain remaining acks.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -409,17 +587,19 @@ where
         match tokio::time::timeout_at(deadline, session.receive_datagram()).await {
             Ok(Ok(dg)) => {
                 if let Ok(ack) = decode_frame_ack_datagram(&dg) {
-                    apply_ack(&mut encoder, &mut stats, &mut last_ack, window_id, ack.seq);
+                    tracker.on_ack(&mut encoder, &mut stats, window_id, ack.seq);
                 }
             }
             _ => break,
         }
     }
+    stats.stream_ms = stream_start.elapsed().as_millis() as u64;
     session.close(0, "done");
     Ok(stats)
 }
 
 /// Encode one source frame and send it as fragmented Frame datagrams.
+/// Returns the last packet's seq and the encode wall time (ms).
 async fn send_encoded(
     session: &Session,
     encoder: &mut Vp9Encoder,
@@ -427,9 +607,17 @@ async fn send_encoded(
     window_id: u64,
     max_dg: usize,
     stats: &mut HostStats,
-) -> Result<()> {
+    tracker: &mut AckTracker,
+) -> Result<(u64, f64)> {
+    let t0 = std::time::Instant::now();
     let packets = encoder.encode(frame).context("VP9 encode")?;
+    let encode_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    stats.encode_ms_total += encode_ms as u64;
+    stats.encode_ms_max = stats.encode_ms_max.max(encode_ms as u64);
+    let mut last_seq = frame.seq();
     for pkt in &packets {
+        last_seq = pkt.seq;
+        tracker.on_sent(pkt.seq);
         let frags = fragment_frame(window_id, pkt.seq, pkt.is_keyframe, &pkt.data, max_dg)
             .context("fragment frame")?;
         for f in &frags {
@@ -451,57 +639,40 @@ async fn send_encoded(
         );
     }
     stats.frames_encoded += packets.len() as u64;
-    Ok(())
+    Ok((last_seq, encode_ms))
 }
 
-/// Pace ~30 fps and collect FrameAcks in the pacing window; each ack
-/// tightens the encoder's reference constraint before the next frame
-/// is encoded.
+/// Collect FrameAcks after a send; each ack tightens the encoder's
+/// reference constraint before the next frame is encoded.
+///
+/// [`PaceMode::Fixed`]: a fixed ~33 ms window (30 fps pacing).
+/// [`PaceMode::Ack`]: ack-clocked — return as soon as the ack for
+/// `last_sent` has been applied; the deadline adapts to the measured
+/// encode time (`2 x EMA + 20 ms`, clamped to 33..=1000 ms) so a
+/// genuinely lost frame cannot stall the host, it just falls back
+/// to the tracker's invalidation on the next ack.
 async fn pace_and_collect_acks(
     session: &Session,
     encoder: &mut Vp9Encoder,
     stats: &mut HostStats,
-    last_ack: &mut Option<u64>,
+    tracker: &mut AckTracker,
     window_id: u64,
+    pace_state: &PaceState,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(33);
+    let window = match pace_state.mode {
+        PaceMode::Fixed => Duration::from_millis(33),
+        PaceMode::Ack => Duration::from_millis((2.0 * pace_state.encode_ema_ms + 20.0) as u64)
+            .clamp(Duration::from_millis(33), Duration::from_millis(1000)),
+    };
+    let deadline = tokio::time::Instant::now() + window;
     while let Ok(Ok(dg)) = tokio::time::timeout_at(deadline, session.receive_datagram()).await {
         if let Ok(ack) = decode_frame_ack_datagram(&dg) {
-            apply_ack(encoder, stats, last_ack, window_id, ack.seq);
+            tracker.on_ack(encoder, stats, window_id, ack.seq);
+            if pace_state.mode == PaceMode::Ack && tracker.is_acked(pace_state.last_sent) {
+                break;
+            }
         }
     }
-}
-
-fn apply_ack(
-    encoder: &mut Vp9Encoder,
-    stats: &mut HostStats,
-    last_ack: &mut Option<u64>,
-    window_id: u64,
-    seq: u64,
-) {
-    // A jump over un-acked seqs means those frames were lost at the
-    // client (never decoded, never acked): the reference chain is
-    // broken for anything after the gap, so invalidate promptly
-    // instead of waiting for the encoder's ack-stall escalation.
-    if let Some(prev) = *last_ack {
-        if seq > prev + 1 {
-            encoder.invalidate_reference();
-            stats.invalidations += 1;
-            info!(
-                stream = "datagram",
-                prev_ack = prev,
-                ack = seq,
-                "FrameAck gap: reference invalidated"
-            );
-        }
-    }
-    encoder.set_reference_constraint(Some(seq));
-    *last_ack = Some(seq);
-    stats.acks_received.push(seq);
-    info!(
-        stream = "datagram",
-        window_id, seq, "received FrameAck -> set_reference_constraint"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -718,10 +889,11 @@ pub fn run_inprocess_with_source<S: FrameSink, F: FrameSource>(
     .map_err(|e| anyhow::anyhow!("upsert_window: {e}"))?;
     client.window_id = window_id;
 
+    let stream_start = std::time::Instant::now();
     let mut encoder =
         Vp9Encoder::new(encoder_config_for(width, height)).context("create VP9 encoder")?;
     let mut decoder = Vp9Decoder::new(DecoderConfig::default()).context("create VP9 decoder")?;
-    let mut last_ack: Option<u64> = None;
+    let mut tracker = AckTracker::default();
     // FrameAck channel: client acks are applied to the encoder before
     // the next frame is encoded, exactly as in run_host's pacing loop.
     let mut pending_acks: Vec<u64> = Vec::new();
@@ -732,11 +904,17 @@ pub fn run_inprocess_with_source<S: FrameSink, F: FrameSource>(
                               host: &mut HostStats,
                               client: &mut ClientStats,
                               pending_acks: &mut Vec<u64>,
+                              tracker: &mut AckTracker,
                               sink: &mut S|
      -> Result<()> {
+        let t0 = std::time::Instant::now();
         let packets = encoder.encode(frame).context("VP9 encode")?;
+        let encode_ms = t0.elapsed().as_millis() as u64;
+        host.encode_ms_total += encode_ms;
+        host.encode_ms_max = host.encode_ms_max.max(encode_ms);
         host.frames_encoded += packets.len() as u64;
         for pkt in &packets {
+            tracker.on_sent(pkt.seq);
             host.frames_sent += 1;
             if pkt.is_keyframe {
                 host.keyframes_sent += 1;
@@ -785,11 +963,12 @@ pub fn run_inprocess_with_source<S: FrameSink, F: FrameSource>(
         &mut host,
         &mut client,
         &mut pending_acks,
+        &mut tracker,
         sink,
     )?;
     for _ in 1..frame_count {
         for ack_seq in pending_acks.drain(..) {
-            apply_ack(&mut encoder, &mut host, &mut last_ack, window_id, ack_seq);
+            tracker.on_ack(&mut encoder, &mut host, window_id, ack_seq);
         }
         let frame = source.next_frame().context("next frame from source")?;
         if (frame.width(), frame.height()) != (width, height) {
@@ -809,18 +988,60 @@ pub fn run_inprocess_with_source<S: FrameSink, F: FrameSource>(
             &mut host,
             &mut client,
             &mut pending_acks,
+            &mut tracker,
             sink,
         )?;
     }
     for ack_seq in pending_acks.drain(..) {
-        apply_ack(&mut encoder, &mut host, &mut last_ack, window_id, ack_seq);
+        tracker.on_ack(&mut encoder, &mut host, window_id, ack_seq);
     }
+    host.stream_ms = stream_start.elapsed().as_millis() as u64;
     Ok((host, client))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tracker_with_frames(seqs: &[u64]) -> (Vp9Encoder, AckTracker, HostStats) {
+        let mut encoder =
+            Vp9Encoder::new(EncoderConfig::realtime(64, 64, 800)).expect("create test encoder");
+        let mut tracker = AckTracker::default();
+        let stats = HostStats::default();
+        for &seq in seqs {
+            let frame = codec::pattern::moving_rectangle(64, 64, seq).expect("pattern frame");
+            encoder.encode(&frame).expect("encode test frame");
+            tracker.on_sent(seq);
+        }
+        (encoder, tracker, stats)
+    }
+
+    #[test]
+    fn sparse_capture_acks_do_not_invalidate() {
+        // The Mac baseline case: sent seqs are capture seqs with
+        // large gaps; every sent frame is acked in order.
+        let (mut enc, mut tr, mut stats) = tracker_with_frames(&[0, 95, 102, 109]);
+        for seq in [0, 95, 102, 109] {
+            tr.on_ack(&mut enc, &mut stats, 7, seq);
+        }
+        assert_eq!(stats.invalidations, 0);
+        assert_eq!(stats.acks_received, vec![0, 95, 102, 109]);
+    }
+
+    #[test]
+    fn lost_sent_frame_invalidates_once_after_grace() {
+        // Sent 0..=3; frame 1 is never acked. ack(2) makes it
+        // suspect (one ack of grace for reordering); ack(3)
+        // confirms the loss -> exactly one invalidation.
+        let (mut enc, mut tr, mut stats) = tracker_with_frames(&[0, 1, 2, 3]);
+        tr.on_ack(&mut enc, &mut stats, 7, 0);
+        assert_eq!(stats.invalidations, 0);
+        tr.on_ack(&mut enc, &mut stats, 7, 2);
+        assert_eq!(stats.invalidations, 0, "first skip is only suspect");
+        tr.on_ack(&mut enc, &mut stats, 7, 3);
+        assert_eq!(stats.invalidations, 1, "second skip confirms the loss");
+        assert_eq!(stats.acks_received, vec![0, 2, 3]);
+    }
 
     #[test]
     fn bitrate_scales_with_pixels_and_clamps() {
