@@ -13,6 +13,7 @@ tracing-subscriber.workspace = true
 window-stream-proto = { path = "../proto" }
 window-stream-transport = { path = "../transport" }
 window-stream-client = { path = "../client" }
+window-stream-platform = { path = "../platform" }
 codec = { package = "window-stream-codec", path = "../codec" }
 
 # Only used by the e2e-client --display shell (winit window + wgpu

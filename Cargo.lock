@@ -3514,6 +3514,7 @@ dependencies = [
  "wgpu",
  "window-stream-client",
  "window-stream-codec",
+ "window-stream-platform",
  "window-stream-proto",
  "window-stream-transport",
  "winit",
