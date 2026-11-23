@@ -35,7 +35,7 @@ async fn run() -> Result<()> {
     // Start the source *before* binding / printing the cert hash, so
     // a bad window id or a missing Screen Recording grant fails
     // fast with no listener left behind.
-    let pace = match arg("--pace", "fixed").as_str() {
+    let pace = match arg("--pace", "ack").as_str() {
         "fixed" => PaceMode::Fixed,
         "ack" => PaceMode::Ack,
         other => anyhow::bail!("unknown --pace {other:?} (want fixed|ack)"),
@@ -47,7 +47,7 @@ async fn run() -> Result<()> {
                 .parse()
                 .context("--source real needs --window <id> (see `platform_probe --list`)")?;
             let fps: u32 = arg("--fps", "30").parse()?;
-            let scale = match arg("--scale", "native").as_str() {
+            let scale = match arg("--scale", "point").as_str() {
                 "native" => CaptureScale::Native,
                 "point" => CaptureScale::Point,
                 other => anyhow::bail!("unknown --scale {other:?} (want native|point)"),
