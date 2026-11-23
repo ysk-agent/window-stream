@@ -8,6 +8,15 @@ name: e2e-mac
 
 on:
   workflow_dispatch:
+  # GitHub only honours workflow_dispatch for workflows on the
+  # default branch, so until this file lands on main, a push that
+  # touches the workflow itself on this branch acts as the dispatch
+  # (same pattern as perf-cycle.yml).
+  push:
+    branches:
+      - track/e2e-mac-ci
+    paths:
+      - ".github/workflows/e2e-mac.yml"
 
 jobs:
   build:
