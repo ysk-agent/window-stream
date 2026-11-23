@@ -77,7 +77,7 @@ WebTransport. Five message types only:
 | `Window` | host → client | reliable stream | window id, geometry; create/update/destroy in one type |
 | `Frame` | host → client | datagram | window id, sequence number, keyframe flag, VP9 data |
 | `Input` | client → host | datagram | window id, key / pointer event |
-| `FrameAck` | client → host | datagram | sequence number of last successfully decoded frame |
+| `FrameAck` | client → host | datagram | window id and sequence number of last successfully decoded frame |
 
 ## Loss policy: no FEC, no retransmission
 

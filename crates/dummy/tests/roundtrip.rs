@@ -32,7 +32,10 @@ async fn hello_window_frame_frameack_roundtrip() {
     assert_eq!(client.window_height, DUMMY_HEIGHT);
     // Frames (all of them, in order, payload verified inside run_client)
     assert_eq!(client.frames_received, vec![0, 1, 2, 3, 4]);
-    assert_eq!(client.payload_bytes_total, FRAMES as usize * DEFAULT_FRAME_BYTES);
+    assert_eq!(
+        client.payload_bytes_total,
+        FRAMES as usize * DEFAULT_FRAME_BYTES
+    );
     // FrameAcks (host saw an ack for every frame)
     assert_eq!(host_stats.frames_sent, FRAMES);
     assert_eq!(host_stats.acks_received, vec![0, 1, 2, 3, 4]);

@@ -18,7 +18,7 @@ pub mod datagram;
 
 pub use control::{FrameAck, Hello, Window};
 pub use datagram::{
-    fragment_frame, FrameHeader, FrameReassembler, InputEventKind, InputHeader, DatagramError,
+    fragment_frame, DatagramError, FrameHeader, FrameReassembler, InputEventKind, InputHeader,
     KIND_FRAME, KIND_FRAME_ACK, KIND_INPUT,
 };
 

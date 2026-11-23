@@ -16,9 +16,11 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::info;
-use window_stream_proto::datagram::{decode_frame_ack_datagram, encode_frame_ack_datagram, fragment_frame};
-use window_stream_proto::{FrameAck, FrameReassembler, Hello, Window, PROTOCOL_VERSION};
 use window_stream_proto::control::window::Kind as WindowKind;
+use window_stream_proto::datagram::{
+    decode_frame_ack_datagram, encode_frame_ack_datagram, fragment_frame,
+};
+use window_stream_proto::{FrameAck, FrameReassembler, Hello, Window, PROTOCOL_VERSION};
 use window_stream_transport::{
     connect, decode_hello, decode_window, parse_cert_hash_hex, read_control_message, send_hello,
     send_window, HostEndpoint, SelfSignedIdentity, Session,
@@ -42,7 +44,9 @@ pub fn test_pattern(seq: u64, len: usize) -> Vec<u8> {
 }
 
 pub fn verify_test_pattern(seq: u64, data: &[u8]) -> bool {
-    data.iter().enumerate().all(|(i, b)| *b == test_pattern_byte(seq, i))
+    data.iter()
+        .enumerate()
+        .all(|(i, b)| *b == test_pattern_byte(seq, i))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,19 +83,47 @@ pub async fn start_host(frame_count: u64, frame_bytes: usize) -> Result<HostHand
     let addr = endpoint.local_addr();
     info!(%addr, cert_hash = %cert_hash_hex, "dummy-host listening");
     let task = tokio::spawn(async move { run_host(endpoint, frame_count, frame_bytes).await });
-    Ok(HostHandle { addr, cert_hash_hex, task })
+    Ok(HostHandle {
+        addr,
+        cert_hash_hex,
+        task,
+    })
 }
 
 /// Serve exactly one session, then finish.
-pub async fn run_host(endpoint: HostEndpoint, frame_count: u64, frame_bytes: usize) -> Result<HostStats> {
+pub async fn run_host(
+    endpoint: HostEndpoint,
+    frame_count: u64,
+    frame_bytes: usize,
+) -> Result<HostStats> {
     let session: Session = endpoint.accept().await.context("accept session")?;
     info!(remote = %session.remote_address(), stream = "control", "session established");
-    let (mut send, mut recv) = session.accept_control().await.context("accept control stream")?;
+    let (mut send, mut recv) = session
+        .accept_control()
+        .await
+        .context("accept control stream")?;
 
     // Hello (client -> host, control stream)
-    let (tag, body) = read_control_message(&mut recv).await.context("read Hello")?;
+    let (tag, body) = read_control_message(&mut recv)
+        .await
+        .context("read Hello")?;
     let hello = decode_hello(tag, &body).context("decode Hello")?;
-    info!(stream = "control", version = hello.version, "received Hello");
+    info!(
+        stream = "control",
+        version = hello.version,
+        "received Hello"
+    );
+    // The version field is the compatibility gate: accept only the
+    // protocol version this implementation speaks. Returning an error
+    // here drops the session instead of silently interoperating with
+    // a version we do not understand.
+    if hello.version != PROTOCOL_VERSION {
+        anyhow::bail!(
+            "unsupported protocol version {} (this host speaks v{})",
+            hello.version,
+            PROTOCOL_VERSION
+        );
+    }
 
     // Window CREATE (host -> client, control stream)
     let window = Window {
@@ -103,12 +135,22 @@ pub async fn run_host(endpoint: HostEndpoint, frame_count: u64, frame_bytes: usi
         height: DUMMY_HEIGHT,
         title: DUMMY_TITLE.to_string(),
     };
-    send_window(&mut send, &window).await.context("send Window")?;
-    info!(stream = "control", window_id = DUMMY_WINDOW_ID, "sent Window CREATE");
+    send_window(&mut send, &window)
+        .await
+        .context("send Window")?;
+    info!(
+        stream = "control",
+        window_id = DUMMY_WINDOW_ID,
+        "sent Window CREATE"
+    );
 
     // Frames (host -> client, datagrams; fragmented per session limit)
     let max_dg = session.max_datagram_size().unwrap_or(1200);
-    info!(stream = "datagram", max_datagram_size = max_dg, "sending frames");
+    info!(
+        stream = "datagram",
+        max_datagram_size = max_dg,
+        "sending frames"
+    );
     for seq in 0..frame_count {
         let payload = test_pattern(seq, frame_bytes);
         // First frame is a keyframe, the rest are deltas (dummy data,
@@ -118,7 +160,14 @@ pub async fn run_host(endpoint: HostEndpoint, frame_count: u64, frame_bytes: usi
         for frag in &fragments {
             session.send_datagram(frag).context("send Frame datagram")?;
         }
-        info!(stream = "datagram", window_id = DUMMY_WINDOW_ID, seq, fragments = fragments.len(), bytes = payload.len(), "sent Frame");
+        info!(
+            stream = "datagram",
+            window_id = DUMMY_WINDOW_ID,
+            seq,
+            fragments = fragments.len(),
+            bytes = payload.len(),
+            "sent Frame"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
@@ -131,29 +180,49 @@ pub async fn run_host(endpoint: HostEndpoint, frame_count: u64, frame_bytes: usi
             .context("timed out waiting for FrameAck")?
             .context("receive FrameAck datagram")?;
         let ack = decode_frame_ack_datagram(&dg).context("decode FrameAck")?;
-        info!(stream = "datagram", window_id = ack.window_id, seq = ack.seq, "received FrameAck");
+        info!(
+            stream = "datagram",
+            window_id = ack.window_id,
+            seq = ack.seq,
+            "received FrameAck"
+        );
         acks.push(ack.seq);
     }
 
     session.close(0, "done");
-    Ok(HostStats { hello_version: hello.version, frames_sent: frame_count, acks_received: acks })
+    Ok(HostStats {
+        hello_version: hello.version,
+        frames_sent: frame_count,
+        acks_received: acks,
+    })
 }
 
 /// Run the dummy client against `url` (`https://127.0.0.1:<port>`),
 /// pinning the host certificate by its hex SHA-256 hash.
-pub async fn run_client(url: &str, cert_hash_hex: &str, expected_frames: u64) -> Result<ClientStats> {
+pub async fn run_client(
+    url: &str,
+    cert_hash_hex: &str,
+    expected_frames: u64,
+) -> Result<ClientStats> {
     let cert_hash = parse_cert_hash_hex(cert_hash_hex).context("parse cert hash")?;
     let session = connect(url, cert_hash).await.context("connect")?;
     info!(remote = %session.remote_address(), stream = "control", "session established");
-    let (mut send, mut recv) = session.open_control().await.context("open control stream")?;
+    let (mut send, mut recv) = session
+        .open_control()
+        .await
+        .context("open control stream")?;
 
     // Hello
-    let hello = Hello { version: PROTOCOL_VERSION };
+    let hello = Hello {
+        version: PROTOCOL_VERSION,
+    };
     send_hello(&mut send, &hello).await.context("send Hello")?;
     info!(stream = "control", version = hello.version, "sent Hello");
 
     // Window
-    let (tag, body) = read_control_message(&mut recv).await.context("read Window")?;
+    let (tag, body) = read_control_message(&mut recv)
+        .await
+        .context("read Window")?;
     let window = decode_window(tag, &body).context("decode Window")?;
     info!(stream = "control", window_id = window.window_id, width = window.width, height = window.height, title = %window.title, "received Window");
 
@@ -173,14 +242,29 @@ pub async fn run_client(url: &str, cert_hash_hex: &str, expected_frames: u64) ->
                 "test pattern mismatch for seq {}",
                 header.seq
             );
-            info!(stream = "datagram", window_id = header.window_id, seq = header.seq, keyframe = header.keyframe, bytes = payload.len(), "received Frame (payload verified)");
+            info!(
+                stream = "datagram",
+                window_id = header.window_id,
+                seq = header.seq,
+                keyframe = header.keyframe,
+                bytes = payload.len(),
+                "received Frame (payload verified)"
+            );
             frames_received.push(header.seq);
             payload_bytes_total += payload.len();
-            let ack = FrameAck { window_id: header.window_id, seq: header.seq };
+            let ack = FrameAck {
+                window_id: header.window_id,
+                seq: header.seq,
+            };
             session
                 .send_datagram(encode_frame_ack_datagram(&ack))
                 .context("send FrameAck datagram")?;
-            info!(stream = "datagram", window_id = ack.window_id, seq = ack.seq, "sent FrameAck");
+            info!(
+                stream = "datagram",
+                window_id = ack.window_id,
+                seq = ack.seq,
+                "sent FrameAck"
+            );
         }
     }
 

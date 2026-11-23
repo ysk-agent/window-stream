@@ -28,7 +28,10 @@ async fn main() -> Result<()> {
     let stats = run_client(&url, &cert_hash, frames).await?;
     println!(
         "done: window_id={} {}x{} frames_received={:?} payload_bytes_total={}",
-        stats.window_id, stats.window_width, stats.window_height, stats.frames_received,
+        stats.window_id,
+        stats.window_width,
+        stats.window_height,
+        stats.frames_received,
         stats.payload_bytes_total
     );
     Ok(())

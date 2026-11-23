@@ -18,21 +18,27 @@
 //! stream is a byte stream with no message boundaries.
 //!
 //! Certificates: self-signed, generated with `rcgen` (ECDSA P-256,
-//! 14-day validity, as required for WebTransport certificate-hash
-//! pinning). Clients pin the certificate by its SHA-256 hash
+//! 13-day validity, inside the 14-day cap WebTransport
+//! certificate-hash pinning requires). Clients pin the certificate by
+//! its SHA-256 hash
 //! ([`SelfSignedIdentity::cert_hash`]); `with_no_cert_validation` is
 //! available only as an explicit dev escape hatch.
 
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use prost::Message as _;
 use std::net::SocketAddr;
+use window_stream_proto::{Hello, Window};
 use wtransport::endpoint::endpoint_side::Server;
 use wtransport::tls::{Certificate, CertificateChain, PrivateKey, Sha256Digest};
 use wtransport::{ClientConfig, Endpoint, Identity, ServerConfig};
-use window_stream_proto::{Hello, Window};
 
 pub const TAG_HELLO: u8 = 1;
 pub const TAG_WINDOW: u8 = 2;
+
+/// Maximum control-message body size. Hello and Window are well under
+/// 1 KiB; the cap exists so a peer-controlled length prefix cannot
+/// force a multi-gigabyte allocation before a single body byte is read.
+pub const MAX_CONTROL_MESSAGE_LEN: usize = 1 << 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
@@ -46,6 +52,8 @@ pub enum TransportError {
     ControlClosed,
     #[error("unknown control message tag: {0:#04x}")]
     UnknownTag(u8),
+    #[error("control message length {0} exceeds limit {MAX_CONTROL_MESSAGE_LEN}")]
+    MessageTooLarge(usize),
     #[error("prost decode: {0}")]
     Decode(#[from] prost::DecodeError),
 }
@@ -79,15 +87,23 @@ impl SelfSignedIdentity {
             .map_err(|e| TransportError::Cert(e.to_string()))?;
         let cert_der = certified.der().to_vec();
         let key_der = key_pair.serialize_der();
-        let certificate = Certificate::from_der(cert_der)
-            .map_err(|e| TransportError::Cert(e.to_string()))?;
+        let certificate =
+            Certificate::from_der(cert_der).map_err(|e| TransportError::Cert(e.to_string()))?;
         let cert_hash = certificate.hash();
-        let cert_hash_hex = cert_hash.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        let cert_hash_hex = cert_hash
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         let identity = Identity::new(
             CertificateChain::single(certificate),
             PrivateKey::from_der_pkcs8(key_der),
         );
-        Ok(Self { identity, cert_hash, cert_hash_hex })
+        Ok(Self {
+            identity,
+            cert_hash,
+            cert_hash_hex,
+        })
     }
 
     /// SHA-256 hash of the certificate (for client pinning / browsers'
@@ -137,7 +153,10 @@ impl HostEndpoint {
             .build();
         let endpoint = Endpoint::server(config)?;
         let local_addr = endpoint.local_addr()?;
-        Ok(Self { endpoint, local_addr })
+        Ok(Self {
+            endpoint,
+            local_addr,
+        })
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -322,6 +341,9 @@ pub async fn read_control_message(recv: &mut RecvStream) -> Result<(u8, Bytes), 
     let mut len_buf = [0u8; 4];
     read_exact(recv, &mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_CONTROL_MESSAGE_LEN {
+        return Err(TransportError::MessageTooLarge(len));
+    }
     let mut body = vec![0u8; len];
     read_exact(recv, &mut body).await?;
     Ok((tag[0], Bytes::from(body)))

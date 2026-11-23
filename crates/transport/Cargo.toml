@@ -6,13 +6,11 @@ license.workspace = true
 description = "WebTransport (wtransport / quinn) session wrapper for window-stream"
 
 [dependencies]
-anyhow.workspace = true
 bytes.workspace = true
 prost.workspace = true
 rcgen.workspace = true
 thiserror.workspace = true
 time = "0.3"
 tokio.workspace = true
-tracing.workspace = true
 window-stream-proto = { path = "../proto" }
 wtransport.workspace = true

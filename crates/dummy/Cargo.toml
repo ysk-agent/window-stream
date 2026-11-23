@@ -7,7 +7,6 @@ description = "Synthetic host/client for window-stream protocol verification wit
 
 [dependencies]
 anyhow.workspace = true
-bytes.workspace = true
 prost.workspace = true
 tokio.workspace = true
 tracing.workspace = true

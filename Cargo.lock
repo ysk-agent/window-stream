@@ -1527,7 +1527,6 @@ name = "window-stream-dummy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytes",
  "prost",
  "tokio",
  "tracing",
@@ -1550,14 +1549,12 @@ dependencies = [
 name = "window-stream-transport"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "bytes",
  "prost",
  "rcgen",
  "thiserror",
  "time",
  "tokio",
- "tracing",
  "window-stream-proto",
  "wtransport",
 ]

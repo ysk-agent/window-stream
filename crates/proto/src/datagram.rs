@@ -63,6 +63,8 @@ pub enum DatagramError {
     InvalidFragment { index: u16, count: u16 },
     #[error("frame payload is empty")]
     EmptyPayload,
+    #[error("invalid FrameAck payload: {0}")]
+    InvalidFrameAck(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +115,11 @@ impl FrameHeader {
                 index: header.fragment_index,
                 count: header.fragment_count,
             });
+        }
+        if datagram.len() == FRAME_HEADER_LEN {
+            // fragment_frame() never emits an empty chunk, so an empty
+            // payload can only come from a malformed peer.
+            return Err(DatagramError::EmptyPayload);
         }
         Ok((header, &datagram[FRAME_HEADER_LEN..]))
     }
@@ -186,24 +193,55 @@ impl FrameReassembler {
             self.pending.remove(&header.window_id);
             return Ok(Some((header, Bytes::copy_from_slice(payload))));
         }
-        let entry = self.pending.entry(header.window_id).or_insert_with(|| PendingFrame {
-            seq: header.seq,
-            keyframe: header.keyframe,
-            count: header.fragment_count,
-            parts: HashMap::new(),
-        });
-        if entry.seq != header.seq {
-            // Newer (or different) sequence supersedes the stale partial frame.
-            *entry = PendingFrame {
-                seq: header.seq,
-                keyframe: header.keyframe,
-                count: header.fragment_count,
-                parts: HashMap::new(),
-            };
+        // Datagrams are unordered, so a delayed fragment of an older
+        // frame can arrive after a newer frame's assembly has started.
+        // Only a strictly newer sequence supersedes the pending frame;
+        // an older fragment is ignored, and a same-sequence fragment
+        // must agree on the fragment count (otherwise the pending
+        // frame could never complete: parts.len() would never reach
+        // entry.count).
+        match self.pending.get_mut(&header.window_id) {
+            None => {
+                self.pending.insert(
+                    header.window_id,
+                    PendingFrame {
+                        seq: header.seq,
+                        keyframe: header.keyframe,
+                        count: header.fragment_count,
+                        parts: HashMap::new(),
+                    },
+                );
+            }
+            Some(entry) if header.seq > entry.seq => {
+                *entry = PendingFrame {
+                    seq: header.seq,
+                    keyframe: header.keyframe,
+                    count: header.fragment_count,
+                    parts: HashMap::new(),
+                };
+            }
+            Some(entry) if header.seq < entry.seq => return Ok(None),
+            Some(entry) => {
+                if header.fragment_count != entry.count {
+                    return Err(DatagramError::InvalidFragment {
+                        index: header.fragment_index,
+                        count: header.fragment_count,
+                    });
+                }
+            }
         }
-        entry.parts.insert(header.fragment_index, Bytes::copy_from_slice(payload));
+        let entry = self
+            .pending
+            .get_mut(&header.window_id)
+            .expect("entry exists");
+        entry
+            .parts
+            .insert(header.fragment_index, Bytes::copy_from_slice(payload));
         if entry.parts.len() == entry.count as usize {
-            let pending = self.pending.remove(&header.window_id).expect("entry exists");
+            let pending = self
+                .pending
+                .remove(&header.window_id)
+                .expect("entry exists");
             let mut full = BytesMut::new();
             for i in 0..pending.count {
                 full.put_slice(&pending.parts[&i]);
@@ -303,13 +341,16 @@ pub fn encode_frame_ack_datagram(ack: &crate::FrameAck) -> Bytes {
 pub fn decode_frame_ack_datagram(datagram: &[u8]) -> Result<crate::FrameAck, DatagramError> {
     use prost::Message;
     if datagram.is_empty() {
-        return Err(DatagramError::TooShort { actual: 0, needed: 1 });
+        return Err(DatagramError::TooShort {
+            actual: 0,
+            needed: 1,
+        });
     }
     if datagram[0] != KIND_FRAME_ACK {
         return Err(DatagramError::UnknownKind(datagram[0]));
     }
     crate::FrameAck::decode(&datagram[1..])
-        .map_err(|_| DatagramError::UnknownKind(datagram[0]))
+        .map_err(|e| DatagramError::InvalidFrameAck(e.to_string()))
 }
 
 #[cfg(test)]
@@ -318,7 +359,13 @@ mod tests {
 
     #[test]
     fn frame_header_roundtrip() {
-        let h = FrameHeader { keyframe: true, window_id: 7, seq: 42, fragment_index: 0, fragment_count: 1 };
+        let h = FrameHeader {
+            keyframe: true,
+            window_id: 7,
+            seq: 42,
+            fragment_index: 0,
+            fragment_count: 1,
+        };
         let dg = h.encode(b"vp9-bytes");
         let (got, payload) = FrameHeader::decode(&dg).unwrap();
         assert_eq!(got, h);
@@ -327,7 +374,13 @@ mod tests {
 
     #[test]
     fn input_header_roundtrip() {
-        let h = InputHeader { event: InputEventKind::PointerMove, window_id: 3, code: 0, x: -5, y: 120 };
+        let h = InputHeader {
+            event: InputEventKind::PointerMove,
+            window_id: 3,
+            code: 0,
+            x: -5,
+            y: 120,
+        };
         let got = InputHeader::decode(&h.encode()).unwrap();
         assert_eq!(got, h);
     }
@@ -357,15 +410,82 @@ mod tests {
         let b = fragment_frame(1, 2, true, &[9u8; 10], 1200).unwrap();
         let mut re = FrameReassembler::new();
         assert!(re.push(&a[0]).unwrap().is_none());
-        let done = re.push(&b[0]).unwrap().expect("new seq completes on its own");
+        let done = re
+            .push(&b[0])
+            .unwrap()
+            .expect("new seq completes on its own");
         assert_eq!(done.0.seq, 2);
     }
 
     #[test]
     fn frame_ack_datagram_roundtrip() {
-        let ack = crate::FrameAck { window_id: 5, seq: 99 };
+        let ack = crate::FrameAck {
+            window_id: 5,
+            seq: 99,
+        };
         let dg = encode_frame_ack_datagram(&ack);
         assert_eq!(dg[0], KIND_FRAME_ACK);
         assert_eq!(decode_frame_ack_datagram(&dg).unwrap(), ack);
+    }
+
+    #[test]
+    fn delayed_stale_fragment_does_not_clobber_newer_frame() {
+        // Frame 1 (fragmented) starts, frame 2 starts and completes,
+        // then a delayed fragment of frame 1 arrives: it must be
+        // ignored, not restart frame 1's assembly.
+        let a = fragment_frame(1, 1, true, &[7u8; 3000], 1200).unwrap();
+        let b = fragment_frame(1, 2, true, &[9u8; 3000], 1200).unwrap();
+        let mut re = FrameReassembler::new();
+        assert!(re.push(&a[0]).unwrap().is_none());
+        assert!(re.push(&b[0]).unwrap().is_none());
+        assert!(re.push(&b[1]).unwrap().is_none());
+        let done = re.push(&b[2]).unwrap().expect("frame 2 completes");
+        assert_eq!(done.0.seq, 2);
+        // Delayed frame-1 fragment: ignored, and nothing else completes.
+        assert!(re.push(&a[1]).unwrap().is_none());
+        assert!(re.push(&a[2]).unwrap().is_none());
+    }
+
+    #[test]
+    fn mismatched_fragment_count_is_rejected() {
+        let a = fragment_frame(1, 1, true, &[7u8; 3000], 1200).unwrap();
+        let mut bad = a[1].to_vec();
+        // Rewrite fragment_count of the second fragment from 3 to 4.
+        bad[20..22].copy_from_slice(&4u16.to_be_bytes());
+        let mut re = FrameReassembler::new();
+        assert!(re.push(&a[0]).unwrap().is_none());
+        assert!(matches!(
+            re.push(&bad),
+            Err(DatagramError::InvalidFragment { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_frame_payload_is_rejected() {
+        let h = FrameHeader {
+            keyframe: true,
+            window_id: 1,
+            seq: 1,
+            fragment_index: 0,
+            fragment_count: 1,
+        };
+        let dg = h.encode(&[]);
+        assert_eq!(FrameHeader::decode(&dg), Err(DatagramError::EmptyPayload));
+        let mut re = FrameReassembler::new();
+        assert_eq!(re.push(&dg), Err(DatagramError::EmptyPayload));
+    }
+
+    #[test]
+    fn corrupt_frame_ack_reports_invalid_frame_ack() {
+        let mut dg = encode_frame_ack_datagram(&crate::FrameAck {
+            window_id: 5,
+            seq: 99,
+        })
+        .to_vec();
+        dg.truncate(2); // valid kind byte, truncated prost body
+        assert!(matches!(
+            decode_frame_ack_datagram(&dg),
+            Err(DatagramError::InvalidFrameAck(_))
+        ));
     }
 }
