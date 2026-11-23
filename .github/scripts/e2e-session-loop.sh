@@ -73,7 +73,7 @@ bus_push() {
   if git commit --quiet -m "$1 [skip ci]" >/dev/null 2>&1; then
     for _ in 1 2 3 4 5; do
       if git push --quiet origin "$BUS_BRANCH" 2>/dev/null; then break; fi
-      git fetch --quiet origin "$BUS_BRANCH" || break
+      git fetch --quiet origin "+refs/heads/${BUS_BRANCH}:refs/remotes/origin/${BUS_BRANCH}" || break
       git rebase --quiet "origin/${BUS_BRANCH}" || git rebase --abort
       sleep 3
     done
@@ -82,7 +82,14 @@ bus_push() {
 }
 
 bus_fetch() {
-  git -C "$BUS_DIR" fetch --quiet origin "$BUS_BRANCH" 2>/dev/null || true
+  # The bus clone is a --depth 1 single-branch clone, whose default
+  # fetch refspec covers only the default branch: a plain
+  # `git fetch origin <bus branch>` lands in FETCH_HEAD and never
+  # updates refs/remotes/origin/<bus branch>, so every read of
+  # origin/<bus branch> would silently see nothing. Fetch with an
+  # explicit refspec instead. (Verified the hard way: the first
+  # Linux probe session never saw its job and idled out.)
+  git -C "$BUS_DIR" fetch --quiet origin "+refs/heads/${BUS_BRANCH}:refs/remotes/origin/${BUS_BRANCH}" 2>/dev/null || true
 }
 
 shutdown_requested() {
