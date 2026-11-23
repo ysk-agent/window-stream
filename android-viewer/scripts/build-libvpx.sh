@@ -58,15 +58,8 @@ build_one() {
     export STRIP="$TOOLCHAIN_BIN/llvm-strip"
     export RANLIB="$TOOLCHAIN_BIN/llvm-ranlib"
     export NM="$TOOLCHAIN_BIN/llvm-nm"
-    # Toolchain probe: if configure dies with "unable to link
-    # executables", these lines show whether the compiler exists and
-    # whether plain / -static links work at all.
-    echo "== toolchain probe ($abi): $CC"
-    ls -l "$CC" || true
-    "$CC" --version || true
-    echo 'int main(void) { return 0; }' > probe.c
-    "$CC" probe.c -o probe.out && echo "plain link: OK" || echo "plain link: FAIL"
-    "$CC" -static probe.c -o probe-static.out && echo "-static link: OK" || echo "-static link: FAIL"
+    echo "== libvpx $abi: $CC"
+    "$CC" --version | head -1
     "$SRC/configure" \
       --target="$vpx_target" \
       --prefix="$prefix" \
