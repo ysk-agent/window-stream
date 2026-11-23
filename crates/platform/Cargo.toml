@@ -6,12 +6,6 @@ rust-version = "1.74"
 license = "MIT OR Apache-2.0"
 description = "OS adapters for window-stream: window enumeration, per-window capture and input injection behind common traits. macOS via ScreenCaptureKit + CGEvent; stub backend elsewhere."
 
-# This crate is intentionally standalone: the empty [workspace] table keeps
-# it out of any parent workspace, so it can be checked on its own with
-# `cargo check -p` not required -- plain `cargo check` inside this directory.
-# The root workspace (owned by another track) aggregates it later.
-[workspace]
-
 [dependencies]
 thiserror = "2"
 tracing = "0.1"

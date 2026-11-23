@@ -1,6 +1,16 @@
 [workspace]
 resolver = "2"
-members = ["crates/proto", "crates/transport", "crates/dummy"]
+members = [
+    "crates/proto",
+    "crates/transport",
+    "crates/dummy",
+    "crates/codec",
+    "crates/client",
+    "crates/platform",
+]
+# The Android Rust core stays a standalone crate: cargo-ndk builds it on its
+# own (with its own lockfile) from the GitHub Actions Android workflow.
+exclude = ["android/rust"]
 
 [workspace.package]
 version = "0.1.0"
