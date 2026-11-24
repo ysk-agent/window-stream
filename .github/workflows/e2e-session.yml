@@ -1,0 +1,76 @@
+name: e2e-session
+
+# Long-lived macOS build session for the e2e binaries, driven over
+# a per-session git branch (see .github/scripts/e2e-session-loop.sh
+# for the design and its security positioning — an adaptation of
+# the session-server design in ysk-agent/android-ci to a repo with
+# no tailnet secret). One runner acquisition serves many
+# fetch/build/test cycles, instead of one acquisition per build.
+#
+# Start:  gh workflow run e2e-session.yml --ref track/capture-scale
+# Drive:  push jobs/<id>-<name>.job (bash) to the printed
+#         session-bus-<run id> branch; read results/<id>.state and
+#         results/<id>.log from the same branch.
+# End:    push a SHUTDOWN file to the bus branch, or let it idle
+#         out (default 60 min after the last activity). Absolute
+#         cap: the 350-minute job timeout below (Actions cap 360).
+
+on:
+  workflow_dispatch:
+    inputs:
+      idle_minutes:
+        description: "End the session after this many minutes without job activity"
+        required: false
+        default: "60"
+
+permissions:
+  contents: write
+
+# One session at a time for this workflow (v1 simplification).
+concurrency:
+  group: e2e-session
+  cancel-in-progress: false
+
+jobs:
+  session:
+    runs-on: macos-15
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show runner info
+        run: |
+          sw_vers
+          uname -m
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install libvpx, pkg-config, protobuf
+        run: |
+          brew install libvpx pkg-config protobuf
+          # bindgen needs a findable libclang; the Xcode CLT copy is
+          # the first choice, Homebrew llvm is the fallback (same
+          # recipe as perf-cycle.yml / e2e-mac.yml).
+          CLT_LIBCLANG="/Library/Developer/CommandLineTools/usr/lib"
+          if [ -f "$CLT_LIBCLANG/libclang.dylib" ]; then
+            echo "LIBCLANG_PATH=$CLT_LIBCLANG" >> "$GITHUB_ENV"
+          else
+            brew install llvm
+            echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+          fi
+          pkg-config --modversion vpx
+
+      - name: Session loop (git-bus job server)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IDLE_MINUTES: ${{ inputs.idle_minutes }}
+        run: bash .github/scripts/e2e-session-loop.sh
+
+      - name: Upload session outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-session-out
+          path: session-out/
+          if-no-files-found: ignore

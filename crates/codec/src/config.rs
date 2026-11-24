@@ -61,6 +61,26 @@ pub struct EncoderConfig {
     /// at the cost of ~10–15% more total host CPU time. Hosts running
     /// many windows at once may want to lower this per encoder.
     pub threads: u32,
+    /// Tile columns, log2 (`VP9E_SET_TILE_COLUMNS`): the frame is split
+    /// into `2^tile_columns_log2` independently-coded vertical tiles,
+    /// which libvpx can encode in parallel (in addition to row-MT).
+    /// Costs a small amount of compression (tiles break prediction
+    /// across their borders). 0 (default) = single tile. Perf cycle 2
+    /// measures the trade-off before any default is adopted.
+    pub tile_columns_log2: u32,
+    /// Screen-content tuning (`VP9E_SET_TUNE_CONTENT` =
+    /// `VP9E_CONTENT_SCREEN`): libvpx adjusts its mode decisions for
+    /// sharp-edged desktop content instead of camera video.
+    /// The realtime default is **true** (perf cycle 2, 2026-11-23):
+    /// on the harness's desktop patterns it cut motion bitrate by
+    /// 40% (720p) to 59% (1080p) while *raising* luma PSNR by ~4 dB,
+    /// at unchanged encode time; static content was unchanged.
+    /// Measured cost: on camera-like high-detail content (the harness
+    /// `noise` pattern — the closest analogue of a window playing a
+    /// full-screen video) bitrate and PSNR were unchanged but encode
+    /// p50 roughly doubled on the development VM. Hosts that stream
+    /// video-heavy windows may set this to false per encoder.
+    pub screen_content: bool,
     /// Automatic keyframe interval in frames. 0 disables periodic keyframes
     /// (keyframes only on start / explicit request), which is the protocol's
     /// preferred shape: loss recovery is driven by `FrameAck`, not a timer.
@@ -87,6 +107,30 @@ pub struct EncoderConfig {
     pub ack_stall_threshold_frames: u32,
 }
 
+/// Recommended encoder thread count for a host running
+/// `concurrent_windows` encoders at once on `cores` CPU cores
+/// (perf cycle 2, 2026-11-23; revised in the cycle-2 fix-up after the
+/// watcher review caught untraceable multi-run data).
+///
+/// Prefer 2 threads per encoder whenever the total fits the core
+/// budget (`2 * windows <= cores`): 2 threads is better or equal on
+/// every measured axis — single-window aggregate fps 71.5 vs 46.6 at
+/// 720p (32.0 vs 24.5 at 1080p), and at 3 windows CPU per frame is a
+/// wash (720p: 19.1 vs 20.2 ms mean; 1080p: 41.7 vs 41.9 ms mean).
+/// Drop to 1 only to avoid oversubscribing the cores, because 1
+/// thread costs bitrate: at 3 windows, 1 thread spent +20% more bits
+/// at 1080p motion (2179 vs 1817 kbps per window; +4.5% at 720p) for
+/// the same content. It is a starting point for the host's own
+/// budgeting, not a cap.
+pub fn recommended_encoder_threads(concurrent_windows: u32, cores: u32) -> u32 {
+    let cores = cores.max(1);
+    if concurrent_windows.saturating_mul(2) <= cores {
+        2
+    } else {
+        1
+    }
+}
+
 /// Default [`EncoderConfig::ack_stall_threshold_frames`]: force a
 /// keyframe once acks lag the encoder by more than 30 frames (~1 s at
 /// 30 fps). A safety net for ack stall, not a substitute for calling
@@ -103,6 +147,8 @@ impl EncoderConfig {
             fps: 30,
             cpu_used: 6,
             threads: 2,
+            tile_columns_log2: 0,
+            screen_content: true,
             keyframe_interval: 0,
             reference_mode: ReferenceMode::default(),
             error_resilient: true,
@@ -149,5 +195,30 @@ pub struct DecoderConfig {
 impl Default for DecoderConfig {
     fn default() -> Self {
         Self { threads: 2 }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn realtime_defaults_include_screen_content_tuning() {
+        let cfg = EncoderConfig::realtime(1280, 720, 2500);
+        assert!(cfg.screen_content);
+        assert_eq!(cfg.tile_columns_log2, 0);
+        assert_eq!(cfg.threads, 2);
+    }
+
+    #[test]
+    fn thread_budget_prefers_two_within_core_budget() {
+        assert_eq!(recommended_encoder_threads(1, 8), 2);
+        assert_eq!(recommended_encoder_threads(2, 4), 2);
+        assert_eq!(recommended_encoder_threads(3, 8), 2);
+        // 3 windows x 2 threads = 6 > 2 cores: drop to 1 to avoid
+        // oversubscription; likewise 8 windows on 8 cores.
+        assert_eq!(recommended_encoder_threads(3, 2), 1);
+        assert_eq!(recommended_encoder_threads(8, 8), 1);
+        assert_eq!(recommended_encoder_threads(2, 3), 1);
     }
 }

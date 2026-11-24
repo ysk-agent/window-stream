@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Window Stream Viewer</string>
+    <string name="connect_title">Connect to a window-stream host</string>
+    <string name="url_hint">Host URL, e.g. https://192.168.1.10:4433</string>
+    <string name="cert_hint">Certificate hash (64 hex chars, printed by the host)</string>
+    <string name="connect_button">Connect</string>
+    <string name="demo_button">Demo pattern (no host)</string>
+</resources>

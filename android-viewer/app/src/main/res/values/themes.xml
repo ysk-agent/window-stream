@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- GameActivity descends from AppCompatActivity, so the viewer
+         activity needs an AppCompat theme; the config activity is a
+         plain Activity and tolerates it too. -->
+    <style name="Theme.WindowStreamViewer" parent="Theme.AppCompat.NoActionBar" />
+</resources>

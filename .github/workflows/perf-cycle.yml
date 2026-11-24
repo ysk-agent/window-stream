@@ -1,0 +1,75 @@
+name: perf-cycle
+
+# Minimal measurement workflow for the perf harness (crates/perf):
+# confirm the order of magnitude of the cycle-1/2 numbers on an
+# unthrottled runner. The detailed measurement programme (pacing,
+# thread allocation, cpu_used investigation) lives on the development
+# VM; this workflow is deliberately small — motion scenarios only,
+# shipped defaults, three repetitions for a median.
+#
+# Manual dispatch only (workflow_dispatch). GitHub honours
+# workflow_dispatch only for workflows present on the default branch,
+# so until this file lands on main, a push that touches the workflow
+# itself on the perf branch acts as the dispatch; the paths filter
+# keeps ordinary code pushes from triggering runs.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - track/perf-cycle-2
+    paths:
+      - ".github/workflows/perf-cycle.yml"
+
+jobs:
+  perf:
+    name: perf (macos-15)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install libvpx
+        run: |
+          brew install libvpx pkg-config protobuf
+          # bindgen needs a findable libclang; the Xcode CLT copy is
+          # the first choice, Homebrew llvm is the fallback.
+          CLT_LIBCLANG="/Library/Developer/CommandLineTools/usr/lib"
+          if [ -f "$CLT_LIBCLANG/libclang.dylib" ]; then
+            echo "LIBCLANG_PATH=$CLT_LIBCLANG" >> "$GITHUB_ENV"
+          else
+            brew install llvm
+            echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+          fi
+
+      - name: Record environment
+        run: |
+          mkdir -p results
+          {
+            echo "runner: macos-15 (GitHub-hosted, shared — noisy)"
+            uname -a
+            sw_vers
+            echo "ncpu: $(sysctl -n hw.ncpu)"
+            sysctl -n machdep.cpu.brand_string
+            echo "libvpx (pkg-config): $(pkg-config --modversion vpx)"
+            rustc --version
+          } | tee results/env.txt
+
+      - name: Build perf harness
+        run: cargo build --release -p window-stream-perf
+
+      - name: Run minimal set (unpaced, motion only, x3 for median)
+        run: |
+          for r in 1 2 3; do
+            ./target/release/perf-cycle --motion-only --label "macos_r$r" --out "results/macos_r$r.jsonl"
+          done
+          ls -l results/
+
+      - name: Upload raw results
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results-macos-15
+          path: results/
+          if-no-files-found: error

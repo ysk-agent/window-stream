@@ -4,7 +4,8 @@ End-to-end wiring of the real frame path, built on the existing crates
 without changing any of their responsibilities:
 
 ```
-codec::pattern::moving_rectangle (dummy test pattern, no OS capture)
+source::FrameSource (PatternSource by default; RealCaptureSource
+  pulls ScreenCaptureKit BGRA on macOS and converts it to I420)
   -> codec::Vp9Encoder (AckGated)
   -> proto::fragment_frame (Frame datagrams)
   -> transport::Session datagrams (WebTransport/QUIC)
@@ -26,7 +27,11 @@ tokio does I/O only).
 
 ## Binaries
 
-- `e2e-host [--port 4433] [--frames 30]` — WebTransport host (VP9).
+- `e2e-host [--port 4433] [--frames 30] [--source pattern|real] [--window <id>] [--fps 30] [--scale native|point] [--pace fixed|ack]` — WebTransport host (VP9). Defaults (since the 2026-11-23 improvement cycle, see `docs/REAL_CAPTURE.md`): `--scale point` captures at the window's point size (1x) instead of native Retina pixels; `--pace ack` paces sends by FrameAck arrival (adaptive) instead of a fixed 33 ms window. Pass `--scale native --pace fixed` to reproduce the pre-cycle behavior.
+  `--source real` captures one macOS window via ScreenCaptureKit
+  (BGRA -> I420, Retina sizes included); on Linux / CI the stub
+  backend fails fast instead of faking frames. See
+  `docs/REAL_CAPTURE.md` for the on-device procedure.
 - `e2e-client` — headless, in-process loop; prints numeric stats.
 - `e2e-client --url https://127.0.0.1:PORT --cert-hash HEX` — headless
   over real WebTransport.
@@ -34,6 +39,19 @@ tokio does I/O only).
   winit window whose `Compositor` is the FrameSink (Xvfb-friendly);
   without `--url` the decoded frames come from the in-process loop on a
   worker thread.
+
+## Frame sources
+
+The host pulls I420 frames from a `FrameSource` (`crates/e2e/src/source.rs`):
+`PatternSource` (deterministic moving rectangle, the default and the
+only source with a reproducible reference for the PSNR check),
+`CapturedFrameSource` (platform `CapturedFrame`s off a depth-1 channel,
+BGRA -> I420 with odd sizes cropped to even), and `RealCaptureSource`
+(the channel source fed by a live platform capture session). The
+encoder is sized from the first frame a source produces, and the
+bitrate scales with pixel count (800 kbit/s at 640x360, up to
+8000 kbit/s), so a Retina capture needs no configuration. A mid-stream
+size change is an error in v1 — restart the host.
 
 ## Verification status on the Muse VM (2026-11-23)
 

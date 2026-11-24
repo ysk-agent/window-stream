@@ -42,6 +42,10 @@ pub const VP8E_SET_ARNR_MAXFRAMES: i32 = 21;
 pub const VP8E_SET_ARNR_STRENGTH: i32 = 22;
 pub const VP8E_SET_FRAME_FLAGS: i32 = 27;
 pub const VP9E_SET_TILE_COLUMNS: i32 = 33;
+pub const VP9E_SET_TUNE_CONTENT: i32 = 43;
+/// `vp9e_tune_content` values (from <vpx/vp8cx.h>, in declaration order).
+pub const VP9E_CONTENT_DEFAULT: i32 = 0;
+pub const VP9E_CONTENT_SCREEN: i32 = 1;
 pub const VP9E_SET_SVC: i32 = 39;
 pub const VP9E_SET_SVC_REF_FRAME_CONFIG: i32 = 52;
 pub const VP9E_SET_ROW_MT: i32 = 55;
